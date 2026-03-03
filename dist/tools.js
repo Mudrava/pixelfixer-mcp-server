@@ -1,488 +1,416 @@
 /**
  * MCP Tool definitions for PixelFixer.
  *
- * Each tool is registered with the MCP server and delegates to the PixelFixer API client.
- *
- * Tools:
- *  - list_teams, list_projects, get_project
- *  - list_tasks, get_task, create_task, update_task, move_task, search_tasks
- *  - add_comment, list_comments
- *  - list_columns, list_team_members
- *  - get_github_context, get_repo_tree, get_file_content, create_pull_request, commit_files
- *  - complete_ai_task, list_ai_queue, get_task_context, start_task
+ * v1.0 improvements over v0.2:
+ *   - Session state: init_session / set_context eliminate repetitive teamId/projectId
+ *   - Compact responses: list views return summaries (~90% fewer tokens)
+ *   - Task numbers: get_task, start_task, etc. accept human-readable #taskNumber
+ *   - Simplified workflow: no hardcoded step lists, concise guidance
+ *   - Removed: get_task_context (use start_task or get_task instead)
+ *   - Minified JSON: no pretty-print (saves ~30% tokens)
  */
 import { z } from "zod";
+import { compactTask } from "./client.js";
+// в”Ђв”Ђв”Ђ Helpers в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+function text(data) {
+    return { content: [{ type: "text", text: JSON.stringify(data) }] };
+}
+function textMsg(msg) {
+    return { content: [{ type: "text", text: msg }] };
+}
+function errorMsg(err) {
+    return { content: [{ type: "text", text: `Error: ${err.message}` }], isError: true };
+}
+// Reusable schema fragments
+const optTeamId = z.string().optional().describe("Team ID (auto from session if omitted)");
+const optProjectId = z.string().optional().describe("Project ID (auto from session if omitted)");
+const optTaskId = z.string().optional().describe("Task ID (provide this OR taskNumber)");
+const optTaskNumber = z.number().optional().describe("Human-readable task number, e.g. 43");
+// в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ
+// TOOL REGISTRATION
+// в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ
 export function registerTools(server, client) {
-    // ─── list_teams ──────────────────────────────────────────
-    server.tool("list_teams", "List all teams the authenticated user belongs to. AI TASK WORKFLOW: list_teams → list_projects → list_ai_queue → start_task (for each task) → work → complete_ai_task.", {}, async () => {
+    // в”Ђв”Ђв”Ђ Session State (scoped per registerTools call) в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+    let sessionTeamId = null;
+    let sessionProjectId = null;
+    function resolveTeam(teamId) {
+        const id = teamId || sessionTeamId;
+        if (!id)
+            throw new Error("teamId required вЂ” call init_session or set_context first, or pass teamId.");
+        return id;
+    }
+    function resolveProject(projectId) {
+        const id = projectId || sessionProjectId;
+        if (!id)
+            throw new Error("projectId required вЂ” call init_session or set_context first, or pass projectId.");
+        return id;
+    }
+    async function resolveTaskId(teamId, projectId, taskId, taskNumber) {
+        if (taskId)
+            return taskId;
+        if (taskNumber !== undefined) {
+            const task = await client.resolveTaskByNumber(teamId, projectId, taskNumber);
+            return task.id;
+        }
+        throw new Error("Provide either taskId or taskNumber.");
+    }
+    // в”Ђв”Ђв”Ђ init_session в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+    server.tool("init_session", "Initialize the MCP session вЂ” auto-discovers your team/project and returns the AI task queue. Call this FIRST in every session. If you have multiple teams/projects, use set_context afterward.", {}, async () => {
         const teams = await client.listTeams();
-        return {
-            content: [{ type: "text", text: JSON.stringify(teams, null, 2) }],
-        };
+        if (teams.length === 0)
+            return textMsg("No teams found for this API token.");
+        // Auto-select if only one team
+        const team = teams.length === 1 ? teams[0] : null;
+        if (team)
+            sessionTeamId = team.id;
+        let project = null;
+        let queue = [];
+        if (team) {
+            const projects = await client.listProjects(team.id);
+            if (projects.length === 1) {
+                project = projects[0];
+                sessionProjectId = project.id;
+                queue = await client.searchTasks(team.id, project.id, { aiStatus: "QUEUED,PROCESSING" });
+            }
+        }
+        return text({
+            session: {
+                teamId: sessionTeamId,
+                teamName: team?.name ?? null,
+                projectId: sessionProjectId,
+                projectName: project?.name ?? null,
+            },
+            teams: teams.map((t) => ({ id: t.id, name: t.name })),
+            aiQueue: queue.map(compactTask),
+            hint: sessionProjectId
+                ? `Session ready. ${queue.length} task(s) in AI queue. Use start_task to begin.`
+                : teams.length > 1
+                    ? "Multiple teams found вЂ” call set_context with your teamId and projectId."
+                    : "Multiple projects found вЂ” call set_context with your projectId.",
+        });
     });
-    // ─── list_projects ───────────────────────────────────────
-    server.tool("list_projects", "List all projects in a team. After finding projects, use list_ai_queue to find tasks queued for AI processing.", { teamId: z.string().describe("Team ID") }, async ({ teamId }) => {
-        const projects = await client.listProjects(teamId);
-        return {
-            content: [{ type: "text", text: JSON.stringify(projects, null, 2) }],
-        };
-    });
-    // ─── get_project ─────────────────────────────────────────
-    server.tool("get_project", "Get details of a specific project including its GitHub connection", {
-        teamId: z.string().describe("Team ID"),
-        projectId: z.string().describe("Project ID"),
+    // в”Ђв”Ђв”Ђ set_context в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+    server.tool("set_context", "Set or change the active team and/or project for this session. All subsequent tool calls will use these IDs by default.", {
+        teamId: z.string().optional().describe("Team ID to set as active"),
+        projectId: z.string().optional().describe("Project ID to set as active"),
     }, async ({ teamId, projectId }) => {
+        if (teamId)
+            sessionTeamId = teamId;
+        if (projectId)
+            sessionProjectId = projectId;
+        return text({
+            teamId: sessionTeamId,
+            projectId: sessionProjectId,
+            message: "Session context updated.",
+        });
+    });
+    // в”Ђв”Ђв”Ђ list_teams в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+    server.tool("list_teams", "List all teams the authenticated user belongs to.", {}, async () => {
+        const teams = await client.listTeams();
+        return text(teams.map((t) => ({ id: t.id, name: t.name, slug: t.slug })));
+    });
+    // в”Ђв”Ђв”Ђ list_projects в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+    server.tool("list_projects", "List all projects in a team.", { teamId: optTeamId }, async ({ teamId }) => {
+        const tid = resolveTeam(teamId);
+        const projects = await client.listProjects(tid);
+        return text(projects.map((p) => ({ id: p.id, name: p.name, slug: p.slug })));
+    });
+    // в”Ђв”Ђв”Ђ get_project в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+    server.tool("get_project", "Get details of a specific project including its GitHub connection.", { teamId: optTeamId, projectId: optProjectId }, async ({ teamId, projectId }) => {
+        const tid = resolveTeam(teamId);
+        const pid = resolveProject(projectId);
         const [project, github] = await Promise.all([
-            client.getProject(teamId, projectId),
-            client.getGitHubConnection(teamId, projectId),
+            client.getProject(tid, pid),
+            client.getGitHubConnection(tid, pid),
         ]);
-        return {
-            content: [
-                {
-                    type: "text",
-                    text: JSON.stringify({ ...project, github }, null, 2),
-                },
-            ],
-        };
+        return text({ ...project, github });
     });
-    // ─── list_team_members ───────────────────────────────────
-    server.tool("list_team_members", "List all members of a team. Returns name, email, and avatar for each member.", { teamId: z.string().describe("Team ID") }, async ({ teamId }) => {
-        const members = await client.listMembers(teamId);
-        return {
-            content: [{ type: "text", text: JSON.stringify(members, null, 2) }],
-        };
+    // в”Ђв”Ђв”Ђ list_team_members в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+    server.tool("list_team_members", "List all members of a team.", { teamId: optTeamId }, async ({ teamId }) => {
+        const tid = resolveTeam(teamId);
+        const members = await client.listMembers(tid);
+        return text(members.map((m) => ({ id: m.id, name: m.name, email: m.email })));
     });
-    // ─── list_tasks ──────────────────────────────────────────
-    server.tool("list_tasks", "List all tasks in a project. Includes title, status, priority, AI status, tags, and assignee. NOTE: To work on AI tasks, use list_ai_queue + start_task instead of this tool.", {
-        teamId: z.string().describe("Team ID"),
-        projectId: z.string().describe("Project ID"),
-    }, async ({ teamId, projectId }) => {
-        const tasks = await client.listTasks(teamId, projectId);
-        return {
-            content: [{ type: "text", text: JSON.stringify(tasks, null, 2) }],
-        };
+    // в”Ђв”Ђв”Ђ list_tasks в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+    server.tool("list_tasks", "List all tasks in a project (compact summaries). Use get_task for full details of a specific task.", { teamId: optTeamId, projectId: optProjectId }, async ({ teamId, projectId }) => {
+        const tid = resolveTeam(teamId);
+        const pid = resolveProject(projectId);
+        const tasks = await client.listTasks(tid, pid);
+        return text(tasks.map(compactTask));
     });
-    // ─── get_task ────────────────────────────────────────────
-    server.tool("get_task", "Get full details of a specific task including description, metadata, screenshot URL, page URL, CSS selector, browser info, console errors, network errors, comments, and AI status", {
-        teamId: z.string().describe("Team ID"),
-        projectId: z.string().describe("Project ID"),
-        taskId: z.string().describe("Task ID"),
-    }, async ({ teamId, projectId, taskId }) => {
-        const task = await client.getTask(teamId, projectId, taskId);
-        return {
-            content: [
-                {
-                    type: "text",
-                    text: JSON.stringify(task, null, 2),
-                },
-            ],
-        };
+    // в”Ђв”Ђв”Ђ get_task в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+    server.tool("get_task", "Get full details of a task: description, metadata, screenshot, page URL, CSS selector, browser info, console/network errors, comments, AI status. Accepts taskId OR taskNumber.", {
+        teamId: optTeamId,
+        projectId: optProjectId,
+        taskId: optTaskId,
+        taskNumber: optTaskNumber,
+    }, async ({ teamId, projectId, taskId, taskNumber }) => {
+        const tid = resolveTeam(teamId);
+        const pid = resolveProject(projectId);
+        const id = await resolveTaskId(tid, pid, taskId, taskNumber);
+        const task = await client.getTask(tid, pid, id);
+        return text(task);
     });
-    // ─── create_task ─────────────────────────────────────────
-    server.tool("create_task", "Create a new task in a project. Requires at least a title and columnId. Can optionally set description, priority, assignee, tags, and more. IMPORTANT: title and description MUST be written in English regardless of the user's language.", {
-        teamId: z.string().describe("Team ID"),
-        projectId: z.string().describe("Project ID"),
-        title: z.string().describe("Task title"),
+    // в”Ђв”Ђв”Ђ create_task в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+    server.tool("create_task", "Create a new task. Requires title and columnId. IMPORTANT: title and description MUST be in English.", {
+        teamId: optTeamId,
+        projectId: optProjectId,
+        title: z.string().describe("Task title (English)"),
         columnId: z.string().describe("Column ID to place the task in"),
-        description: z.string().optional().describe("Task description (supports markdown/HTML)"),
+        description: z.string().optional().describe("Task description (markdown/HTML, English)"),
         priority: z.enum(["LOW", "MEDIUM", "HIGH", "CRITICAL"]).optional().describe("Task priority"),
-        assigneeId: z.string().optional().describe("User ID to assign the task to"),
-        tags: z.array(z.string()).optional().describe("Array of tag IDs to attach"),
+        assigneeId: z.string().optional().describe("User ID to assign"),
+        tags: z.array(z.string()).optional().describe("Array of tag IDs"),
         isInternal: z.boolean().optional().describe("Mark as internal (hidden from clients)"),
     }, async ({ teamId, projectId, title, columnId, ...opts }) => {
+        const tid = resolveTeam(teamId);
+        const pid = resolveProject(projectId);
         const data = { title, columnId };
         for (const [k, v] of Object.entries(opts)) {
             if (v !== undefined)
                 data[k] = v;
         }
-        const task = await client.createTask(teamId, projectId, data);
-        return {
-            content: [{ type: "text", text: JSON.stringify(task, null, 2) }],
-        };
+        const task = await client.createTask(tid, pid, data);
+        return text(compactTask(task));
     });
-    // ─── update_task ─────────────────────────────────────────
-    server.tool("update_task", "Update a task's properties: title, description, status, priority, assignee, or AI status. Do NOT use this to move columns — column moves happen automatically via start_task and complete_ai_task. IMPORTANT: title and description MUST be written in English regardless of the user's language.", {
-        teamId: z.string().describe("Team ID"),
-        projectId: z.string().describe("Project ID"),
-        taskId: z.string().describe("Task ID"),
+    // в”Ђв”Ђв”Ђ update_task в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+    server.tool("update_task", "Update task properties. Do NOT use this to move columns вЂ” use start_task/complete_ai_task instead. Accepts taskId OR taskNumber. IMPORTANT: title/description in English.", {
+        teamId: optTeamId,
+        projectId: optProjectId,
+        taskId: optTaskId,
+        taskNumber: optTaskNumber,
         title: z.string().optional().describe("New title"),
         description: z.string().optional().describe("New description"),
-        status: z.string().optional().describe("New status (OPEN, IN_PROGRESS, RESOLVED, CLOSED)"),
-        priority: z.string().optional().describe("New priority (LOW, MEDIUM, HIGH, CRITICAL)"),
-        assigneeId: z.string().optional().describe("Assign to this user ID (empty string to unassign)"),
-        aiStatus: z.string().optional().describe("Set AI status (NONE, QUEUED, PROCESSING)"),
-    }, async ({ teamId, projectId, taskId, ...updates }) => {
+        status: z.string().optional().describe("OPEN | IN_PROGRESS | RESOLVED | CLOSED"),
+        priority: z.string().optional().describe("LOW | MEDIUM | HIGH | CRITICAL"),
+        assigneeId: z.string().optional().describe("User ID (empty string to unassign)"),
+        aiStatus: z.string().optional().describe("NONE | QUEUED | PROCESSING"),
+    }, async ({ teamId, projectId, taskId, taskNumber, ...updates }) => {
+        const tid = resolveTeam(teamId);
+        const pid = resolveProject(projectId);
+        const id = await resolveTaskId(tid, pid, taskId, taskNumber);
         const data = {};
         for (const [k, v] of Object.entries(updates)) {
             if (v !== undefined)
                 data[k] = v;
         }
-        const task = await client.updateTask(teamId, projectId, taskId, data);
-        return {
-            content: [{ type: "text", text: JSON.stringify(task, null, 2) }],
-        };
+        const task = await client.updateTask(tid, pid, id, data);
+        return text(compactTask(task));
     });
-    // ─── move_task ────────────────────────────────────────────
-    server.tool("move_task", "Move a task to a different kanban column. WARNING: Only use this when the user EXPLICITLY asks to move a task. For AI task workflows, use start_task (→ In Progress) and complete_ai_task (→ Review) instead — they handle column moves automatically.", {
-        teamId: z.string().describe("Team ID"),
-        projectId: z.string().describe("Project ID"),
-        taskId: z.string().describe("Task ID"),
-        columnId: z.string().describe("Target column ID to move the task to"),
-        position: z.number().optional().describe("Position within the column (0 = top, default: 0)"),
-    }, async ({ teamId, projectId, taskId, columnId, position }) => {
-        const result = await client.moveTask(teamId, projectId, taskId, columnId, position ?? 0);
-        return {
-            content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        };
+    // в”Ђв”Ђв”Ђ move_task в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+    server.tool("move_task", "Move a task to a different kanban column. Only use when explicitly asked вЂ” start_task and complete_ai_task handle column moves automatically.", {
+        teamId: optTeamId,
+        projectId: optProjectId,
+        taskId: optTaskId,
+        taskNumber: optTaskNumber,
+        columnId: z.string().describe("Target column ID"),
+        position: z.number().optional().describe("Position in column (0 = top)"),
+    }, async ({ teamId, projectId, taskId, taskNumber, columnId, position }) => {
+        const tid = resolveTeam(teamId);
+        const pid = resolveProject(projectId);
+        const id = await resolveTaskId(tid, pid, taskId, taskNumber);
+        const result = await client.moveTask(tid, pid, id, columnId, position ?? 0);
+        return text(result);
     });
-    // ─── search_tasks ────────────────────────────────────────
-    server.tool("search_tasks", "Search tasks with filters: text query, status, priority, AI status, assignee, column, or tag. Returns matching tasks.", {
-        teamId: z.string().describe("Team ID"),
-        projectId: z.string().describe("Project ID"),
-        q: z.string().optional().describe("Text search query (searches title, description, task number)"),
-        status: z.string().optional().describe("Comma-separated statuses: OPEN,IN_PROGRESS,RESOLVED,CLOSED"),
-        priority: z.string().optional().describe("Comma-separated priorities: LOW,MEDIUM,HIGH,CRITICAL"),
-        aiStatus: z.string().optional().describe("Comma-separated AI statuses: NONE,QUEUED,PROCESSING,COMPLETED,FAILED"),
-        assigneeId: z.string().optional().describe("Filter by assignee user ID"),
+    // в”Ђв”Ђв”Ђ search_tasks в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+    server.tool("search_tasks", "Search tasks with filters. Returns compact summaries. Use get_task for full details.", {
+        teamId: optTeamId,
+        projectId: optProjectId,
+        q: z.string().optional().describe("Text search (title, description, task number)"),
+        status: z.string().optional().describe("Comma-separated: OPEN,IN_PROGRESS,RESOLVED,CLOSED"),
+        priority: z.string().optional().describe("Comma-separated: LOW,MEDIUM,HIGH,CRITICAL"),
+        aiStatus: z.string().optional().describe("Comma-separated: NONE,QUEUED,PROCESSING,COMPLETED,FAILED"),
+        assigneeId: z.string().optional().describe("Filter by assignee"),
         columnId: z.string().optional().describe("Filter by column ID"),
         tag: z.string().optional().describe("Comma-separated tag names"),
         limit: z.number().optional().describe("Max results (default 50, max 200)"),
     }, async ({ teamId, projectId, ...filters }) => {
-        const tasks = await client.searchTasks(teamId, projectId, filters);
-        return {
-            content: [
-                {
-                    type: "text",
-                    text: tasks.length > 0
-                        ? JSON.stringify(tasks, null, 2)
-                        : "No tasks found matching the search criteria.",
-                },
-            ],
-        };
+        const tid = resolveTeam(teamId);
+        const pid = resolveProject(projectId);
+        const tasks = await client.searchTasks(tid, pid, filters);
+        return tasks.length > 0
+            ? text(tasks.map(compactTask))
+            : textMsg("No tasks found matching the search criteria.");
     });
-    // ─── add_comment ─────────────────────────────────────────
-    server.tool("add_comment", "Add a comment to a task. Use this to leave progress notes, ask questions, or report findings. Call AFTER making changes and BEFORE complete_ai_task. IMPORTANT: comment content MUST be written in English regardless of the user's language.", {
-        teamId: z.string().describe("Team ID"),
-        projectId: z.string().describe("Project ID"),
-        taskId: z.string().describe("Task ID"),
-        content: z.string().describe("Comment text (supports markdown)"),
-    }, async ({ teamId, projectId, taskId, content }) => {
-        const comment = await client.addComment(teamId, projectId, taskId, content);
-        return {
-            content: [{ type: "text", text: JSON.stringify(comment, null, 2) }],
-        };
+    // в”Ђв”Ђв”Ђ add_comment в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+    server.tool("add_comment", "Add a comment to a task. Call AFTER making changes and BEFORE complete_ai_task. IMPORTANT: content in English.", {
+        teamId: optTeamId,
+        projectId: optProjectId,
+        taskId: optTaskId,
+        taskNumber: optTaskNumber,
+        content: z.string().describe("Comment text (markdown)"),
+    }, async ({ teamId, projectId, taskId, taskNumber, content }) => {
+        const tid = resolveTeam(teamId);
+        const pid = resolveProject(projectId);
+        const id = await resolveTaskId(tid, pid, taskId, taskNumber);
+        const comment = await client.addComment(tid, pid, id, content);
+        return text({ id: comment.id, createdAt: comment.createdAt });
     });
-    // ─── list_comments ───────────────────────────────────────
-    server.tool("list_comments", "List all comments on a task. Returns comment content, author, and timestamps.", {
-        teamId: z.string().describe("Team ID"),
-        projectId: z.string().describe("Project ID"),
-        taskId: z.string().describe("Task ID"),
-    }, async ({ teamId, projectId, taskId }) => {
-        const comments = await client.listComments(teamId, projectId, taskId);
-        return {
-            content: [
-                {
-                    type: "text",
-                    text: comments.length > 0
-                        ? JSON.stringify(comments, null, 2)
-                        : "No comments on this task.",
-                },
-            ],
-        };
+    // в”Ђв”Ђв”Ђ list_comments в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+    server.tool("list_comments", "List all comments on a task.", {
+        teamId: optTeamId,
+        projectId: optProjectId,
+        taskId: optTaskId,
+        taskNumber: optTaskNumber,
+    }, async ({ teamId, projectId, taskId, taskNumber }) => {
+        const tid = resolveTeam(teamId);
+        const pid = resolveProject(projectId);
+        const id = await resolveTaskId(tid, pid, taskId, taskNumber);
+        const comments = await client.listComments(tid, pid, id);
+        return comments.length > 0
+            ? text(comments)
+            : textMsg("No comments on this task.");
     });
-    // ─── list_columns ────────────────────────────────────────
-    server.tool("list_columns", "List all kanban columns in a project. Shows column names, order, color, and whether they trigger AI automation.", {
-        teamId: z.string().describe("Team ID"),
-        projectId: z.string().describe("Project ID"),
-    }, async ({ teamId, projectId }) => {
-        const columns = await client.listColumns(teamId, projectId);
-        return {
-            content: [{ type: "text", text: JSON.stringify(columns, null, 2) }],
-        };
+    // в”Ђв”Ђв”Ђ list_columns в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+    server.tool("list_columns", "List all kanban columns in a project.", { teamId: optTeamId, projectId: optProjectId }, async ({ teamId, projectId }) => {
+        const tid = resolveTeam(teamId);
+        const pid = resolveProject(projectId);
+        const columns = await client.listColumns(tid, pid);
+        return text(columns);
     });
-    // ─── get_github_context ──────────────────────────────────
-    server.tool("get_github_context", "Get the GitHub repository connection for a project. Returns repo name, default branch, etc. Returns null if no repo is connected.", {
-        teamId: z.string().describe("Team ID"),
-        projectId: z.string().describe("Project ID"),
-    }, async ({ teamId, projectId }) => {
-        const conn = await client.getGitHubConnection(teamId, projectId);
-        return {
-            content: [
-                {
-                    type: "text",
-                    text: conn
-                        ? JSON.stringify(conn, null, 2)
-                        : "No GitHub repository connected to this project.",
-                },
-            ],
-        };
+    // в”Ђв”Ђв”Ђ get_github_context в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+    server.tool("get_github_context", "Get the GitHub repository connection for a project. Returns null if no repo is connected.", { teamId: optTeamId, projectId: optProjectId }, async ({ teamId, projectId }) => {
+        const tid = resolveTeam(teamId);
+        const pid = resolveProject(projectId);
+        const conn = await client.getGitHubConnection(tid, pid);
+        return conn ? text(conn) : textMsg("No GitHub repository connected.");
     });
-    // ─── get_repo_tree ───────────────────────────────────────
-    server.tool("get_repo_tree", "Browse the file tree of the connected GitHub repository. Returns directory listing with file names, types, and sizes. Use path to navigate into subdirectories.", {
-        teamId: z.string().describe("Team ID"),
-        projectId: z.string().describe("Project ID"),
+    // в”Ђв”Ђв”Ђ get_repo_tree в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+    server.tool("get_repo_tree", "Browse the file tree of the connected GitHub repository.", {
+        teamId: optTeamId,
+        projectId: optProjectId,
         path: z.string().optional().describe("Directory path (empty for root)"),
-        ref: z.string().optional().describe("Branch, tag, or commit SHA (default: repo default branch)"),
+        ref: z.string().optional().describe("Branch, tag, or commit SHA"),
     }, async ({ teamId, projectId, path, ref }) => {
+        const tid = resolveTeam(teamId);
+        const pid = resolveProject(projectId);
         try {
-            const result = await client.getRepoTree(teamId, projectId, path ?? "", ref);
-            return {
-                content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-            };
+            const result = await client.getRepoTree(tid, pid, path ?? "", ref);
+            return text(result);
         }
         catch (err) {
-            return {
-                content: [{ type: "text", text: `Error: ${err.message}` }],
-                isError: true,
-            };
+            return errorMsg(err);
         }
     });
-    // ─── get_file_content ────────────────────────────────────
-    server.tool("get_file_content", "Read the content of a file from the connected GitHub repository. Returns the full file content as text.", {
-        teamId: z.string().describe("Team ID"),
-        projectId: z.string().describe("Project ID"),
+    // в”Ђв”Ђв”Ђ get_file_content в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+    server.tool("get_file_content", "Read a file from the connected GitHub repository.", {
+        teamId: optTeamId,
+        projectId: optProjectId,
         path: z.string().describe("File path in the repository"),
         ref: z.string().optional().describe("Branch, tag, or commit SHA"),
     }, async ({ teamId, projectId, path, ref }) => {
+        const tid = resolveTeam(teamId);
+        const pid = resolveProject(projectId);
         try {
-            const result = await client.getFileContent(teamId, projectId, path, ref);
-            return {
-                content: [{ type: "text", text: `File: ${result.path}\n\n${result.content}` }],
-            };
+            const result = await client.getFileContent(tid, pid, path, ref);
+            return textMsg(`File: ${result.path}\n\n${result.content}`);
         }
         catch (err) {
-            return {
-                content: [{ type: "text", text: `Error: ${err.message}` }],
-                isError: true,
-            };
+            return errorMsg(err);
         }
     });
-    // ─── create_pull_request ─────────────────────────────────
-    server.tool("create_pull_request", "Create a new branch and pull request in the connected GitHub repository. Call this BEFORE commit_files. The branch is created from the base branch (default: repo default branch). IMPORTANT: PR title, description, and branch name MUST be in English regardless of the user's language.", {
-        teamId: z.string().describe("Team ID"),
-        projectId: z.string().describe("Project ID"),
-        branchName: z.string().describe("Name for the new branch (e.g., 'fix/PF-42-button-color')"),
-        title: z.string().describe("Pull request title"),
-        body: z.string().optional().describe("Pull request description (supports markdown)"),
-        baseBranch: z.string().optional().describe("Base branch to create from (default: repo default branch)"),
+    // в”Ђв”Ђв”Ђ create_pull_request в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+    server.tool("create_pull_request", "Create a branch and pull request. Call BEFORE commit_files. IMPORTANT: all text in English.", {
+        teamId: optTeamId,
+        projectId: optProjectId,
+        branchName: z.string().describe("Branch name (e.g. 'fix/PF-42-button-color')"),
+        title: z.string().describe("PR title"),
+        body: z.string().optional().describe("PR description (markdown)"),
+        baseBranch: z.string().optional().describe("Base branch (default: repo default)"),
     }, async ({ teamId, projectId, branchName, title, body, baseBranch }) => {
+        const tid = resolveTeam(teamId);
+        const pid = resolveProject(projectId);
         try {
-            const result = await client.createBranchAndPR(teamId, projectId, {
+            const result = await client.createBranchAndPR(tid, pid, {
                 branchName,
                 title,
                 body: body ?? "",
                 baseBranch,
             });
-            return {
-                content: [
-                    {
-                        type: "text",
-                        text: `Branch created: ${result.branch}\nPR #${result.pullRequest.number}: ${result.pullRequest.url}`,
-                    },
-                ],
-            };
+            return textMsg(`Branch: ${result.branch}\nPR #${result.pullRequest.number}: ${result.pullRequest.url}`);
         }
         catch (err) {
-            return {
-                content: [{ type: "text", text: `Error: ${err.message}` }],
-                isError: true,
-            };
+            return errorMsg(err);
         }
     });
-    // ─── commit_files ──────────────────────────────────────────
-    server.tool("commit_files", "Commit one or more file changes to a branch in the connected GitHub repository. Call this AFTER create_pull_request to push code changes to the branch. Maximum 50 files per commit. IMPORTANT: commit message MUST be in English regardless of the user's language.", {
-        teamId: z.string().describe("Team ID"),
-        projectId: z.string().describe("Project ID"),
-        branch: z.string().describe("Branch name to commit to (e.g., 'fix/PF-42-button-color')"),
+    // в”Ђв”Ђв”Ђ commit_files в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+    server.tool("commit_files", "Commit files to a branch. Call AFTER create_pull_request. Max 50 files. IMPORTANT: commit message in English.", {
+        teamId: optTeamId,
+        projectId: optProjectId,
+        branch: z.string().describe("Branch name"),
         message: z.string().describe("Commit message"),
         files: z.array(z.object({
-            path: z.string().describe("File path in the repo (e.g., 'src/components/Footer.tsx')"),
-            content: z.string().describe("Full file content after changes"),
-        })).describe("Array of files to create or update"),
+            path: z.string().describe("File path in repo"),
+            content: z.string().describe("Full file content"),
+        })).describe("Files to create or update"),
     }, async ({ teamId, projectId, branch, message, files }) => {
+        const tid = resolveTeam(teamId);
+        const pid = resolveProject(projectId);
         try {
-            const result = await client.commitFiles(teamId, projectId, {
-                branch,
-                message,
-                files,
-            });
-            return {
-                content: [
-                    {
-                        type: "text",
-                        text: `Commit successful!\nSHA: ${result.sha}\nURL: ${result.url}`,
-                    },
-                ],
-            };
+            const result = await client.commitFiles(tid, pid, { branch, message, files });
+            return textMsg(`Committed ${files.length} file(s). SHA: ${result.sha}\n${result.url}`);
         }
         catch (err) {
-            return {
-                content: [{ type: "text", text: `Error: ${err.message}` }],
-                isError: true,
-            };
+            return errorMsg(err);
         }
     });
-    // ─── start_task ────────────────────────────────────────────
-    server.tool("start_task", "Start working on an AI task. This is the MANDATORY first step for every AI task. It moves the task to In Progress, sets AI status to PROCESSING, and returns the full context (task, comments, GitHub info, columns) plus the REQUIRED WORKFLOW you must follow. After calling this, follow the workflow instructions in the response exactly.", {
-        teamId: z.string().describe("Team ID"),
-        projectId: z.string().describe("Project ID"),
-        taskId: z.string().describe("Task ID"),
-    }, async ({ teamId, projectId, taskId }) => {
+    // в”Ђв”Ђв”Ђ start_task в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+    server.tool("start_task", "Start working on an AI task. Moves task to In Progress, sets AI status to PROCESSING, returns full context (task, comments, GitHub info, columns). Accepts taskId OR taskNumber. Call this FIRST for every AI task.", {
+        teamId: optTeamId,
+        projectId: optProjectId,
+        taskId: optTaskId,
+        taskNumber: optTaskNumber,
+    }, async ({ teamId, projectId, taskId, taskNumber }) => {
+        const tid = resolveTeam(teamId);
+        const pid = resolveProject(projectId);
+        const id = await resolveTaskId(tid, pid, taskId, taskNumber);
         try {
-            const result = await client.startTask(teamId, projectId, taskId);
-            const context = {
+            const result = await client.startTask(tid, pid, id);
+            const hasGitHub = !!result.github;
+            const workflow = hasGitHub
+                ? "Workflow: analyze task в†’ explore repo (get_repo_tree/get_file_content) в†’ create_pull_request в†’ commit_files в†’ add_comment в†’ complete_ai_task. All text in English."
+                : "Workflow: analyze task в†’ make local changes в†’ add_comment в†’ complete_ai_task. All text in English.";
+            return text({
                 task: result.task,
                 comments: result.comments,
                 github: result.github,
                 columns: result.columns,
                 reviewColumnId: result.reviewColumnId,
-                workflow: result.github
-                    ? [
-                        "REQUIRED WORKFLOW — follow these steps IN ORDER:",
-                        "1. Read and understand the task description, screenshot, and any console/network errors.",
-                        "2. Use get_repo_tree and get_file_content to explore the codebase and find relevant files.",
-                        "3. Use create_pull_request to create a new branch and PR (branch name: fix/PF-{taskNumber}-short-description).",
-                        "4. Use commit_files to commit your code changes to the new branch.",
-                        "5. Use add_comment to leave a summary of what you changed (in English).",
-                        "6. Use complete_ai_task with status COMPLETED and the PR URL — the task will be auto-moved to the Review column.",
-                        "IMPORTANT: ALL text (PR titles, commit messages, comments, descriptions) MUST be in English.",
-                    ]
-                    : [
-                        "REQUIRED WORKFLOW — follow these steps IN ORDER:",
-                        "1. Read and understand the task description, screenshot, and any console/network errors.",
-                        "2. No GitHub repository is connected — make changes locally using your IDE tools.",
-                        "3. Use add_comment to describe what you changed (in English).",
-                        "4. Use complete_ai_task with status COMPLETED — the task will be auto-moved to the Review column.",
-                        "IMPORTANT: ALL text (comments, descriptions) MUST be in English.",
-                    ],
-            };
-            return {
-                content: [{ type: "text", text: JSON.stringify(context, null, 2) }],
-            };
+                workflow,
+            });
         }
         catch (err) {
-            return {
-                content: [{ type: "text", text: `Error: ${err.message}` }],
-                isError: true,
-            };
+            return errorMsg(err);
         }
     });
-    // ─── complete_ai_task ────────────────────────────────────
-    server.tool("complete_ai_task", "Report the result of AI work on a task. This is the ONLY way to finish an AI task. Automatically moves the task to the Review column. Call AFTER add_comment. Do NOT move tasks manually with move_task. IMPORTANT: message/summary MUST be in English regardless of the user's language.", {
-        teamId: z.string().describe("Team ID"),
-        projectId: z.string().describe("Project ID"),
-        taskId: z.string().describe("Task ID"),
+    // в”Ђв”Ђв”Ђ complete_ai_task в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+    server.tool("complete_ai_task", "Report the result of AI work. Auto-moves task to Review column. Call AFTER add_comment. IMPORTANT: message in English.", {
+        teamId: optTeamId,
+        projectId: optProjectId,
+        taskId: optTaskId,
+        taskNumber: optTaskNumber,
         status: z.enum(["COMPLETED", "FAILED"]).describe("AI result status"),
-        message: z.string().optional().describe("Summary of what was done or why it failed"),
-        prUrl: z.string().optional().describe("URL of the pull request created (if any)"),
-    }, async ({ teamId, projectId, taskId, status, message, prUrl }) => {
-        const result = await client.reportAiResult(teamId, projectId, taskId, {
+        message: z.string().optional().describe("Summary of work done or failure reason"),
+        prUrl: z.string().optional().describe("Pull request URL (if any)"),
+    }, async ({ teamId, projectId, taskId, taskNumber, status, message, prUrl }) => {
+        const tid = resolveTeam(teamId);
+        const pid = resolveProject(projectId);
+        const id = await resolveTaskId(tid, pid, taskId, taskNumber);
+        const result = await client.reportAiResult(tid, pid, id, {
             aiStatus: status,
             comment: message,
             prUrl,
         });
-        return {
-            content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        };
+        return text(result);
     });
-    // ─── list_ai_queue ───────────────────────────────────────
-    server.tool("list_ai_queue", "List tasks that are queued or in-progress for AI processing. For EACH task, call start_task to begin work — it moves the task to In Progress and returns the full context and REQUIRED workflow.", {
-        teamId: z.string().describe("Team ID"),
-        projectId: z.string().describe("Project ID"),
-    }, async ({ teamId, projectId }) => {
-        const tasks = await client.searchTasks(teamId, projectId, {
-            aiStatus: "QUEUED,PROCESSING",
-        });
-        return {
-            content: [
-                {
-                    type: "text",
-                    text: tasks.length > 0
-                        ? JSON.stringify(tasks, null, 2)
-                        : "No tasks in AI queue.",
-                },
-            ],
-        };
-    });
-    // ─── get_task_context ────────────────────────────────────
-    server.tool("get_task_context", "Get comprehensive context for a task without changing its state. Returns: full task details, comments, GitHub repo info, project file tree, kanban columns, and workflow instructions. NOTE: Prefer start_task instead — it does everything this tool does AND moves the task to In Progress.", {
-        teamId: z.string().describe("Team ID"),
-        projectId: z.string().describe("Project ID"),
-        taskId: z.string().describe("Task ID"),
-    }, async ({ teamId, projectId, taskId }) => {
-        const [task, github, columns] = await Promise.all([
-            client.getTask(teamId, projectId, taskId),
-            client.getGitHubConnection(teamId, projectId),
-            client.listColumns(teamId, projectId),
-        ]);
-        // Try to get repo tree if GitHub is connected
-        let repoTree = null;
-        if (github) {
-            try {
-                repoTree = await client.getRepoTree(teamId, projectId);
-            }
-            catch { /* repo tree optional */ }
-        }
-        // Find AI review column
-        const reviewColumn = Array.isArray(columns)
-            ? columns.find((c) => c.isAiReview === true)
-            : null;
-        const context = {
-            task: {
-                id: task.id,
-                taskNumber: task.taskNumber,
-                title: task.title,
-                description: task.description,
-                status: task.status,
-                priority: task.priority,
-                aiStatus: task.aiStatus,
-                source: task.source,
-                pageUrl: task.pageUrl,
-                selector: task.selector,
-                screenshotUrl: task.screenshotUrl,
-                browserInfo: task.browserInfo,
-                consoleErrors: task.consoleErrors,
-                networkErrors: task.networkErrors,
-                metadata: task.metadata,
-                tags: task.tags,
-                assignee: task.assignee,
-                column: task.column,
-                createdAt: task.createdAt,
-            },
-            comments: task.comments ?? [],
-            github: github
-                ? {
-                    repoFullName: github.repoFullName,
-                    defaultBranch: github.defaultBranch,
-                    fileTree: repoTree?.items ?? null,
-                }
-                : null,
-            columns: columns ?? [],
-            reviewColumnId: reviewColumn ? reviewColumn.id : null,
-            workflow: github
-                ? [
-                    "REQUIRED WORKFLOW — follow these steps IN ORDER:",
-                    "1. Read and understand the task description, screenshot, and any console/network errors.",
-                    "2. Use get_repo_tree and get_file_content to explore the codebase and find relevant files.",
-                    "3. Use create_pull_request to create a new branch and PR (branch name: fix/PF-{taskNumber}-short-description).",
-                    "4. Use commit_files to commit your code changes to the new branch. Do NOT edit files locally.",
-                    "5. Use add_comment to leave a summary of what you changed (in English).",
-                    "6. Use complete_ai_task with status COMPLETED and the PR URL — the task will be auto-moved to the review column.",
-                    "IMPORTANT: ALL text (PR titles, commit messages, comments, descriptions) MUST be in English.",
-                    "IMPORTANT: Do NOT use local file editing. ALL code changes must go through commit_files.",
-                ]
-                : [
-                    "REQUIRED WORKFLOW — follow these steps IN ORDER:",
-                    "1. Read and understand the task description, screenshot, and any console/network errors.",
-                    "2. No GitHub repository is connected — make changes locally using your IDE tools.",
-                    "3. Use add_comment to describe what you changed (in English).",
-                    "4. Use complete_ai_task with status COMPLETED — the task will be auto-moved to the review column.",
-                    "IMPORTANT: ALL text (comments, descriptions) MUST be in English.",
-                ],
-        };
-        return {
-            content: [{ type: "text", text: JSON.stringify(context, null, 2) }],
-        };
+    // в”Ђв”Ђв”Ђ list_ai_queue в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+    server.tool("list_ai_queue", "List tasks queued for AI processing (compact summaries). Use start_task on each to begin work.", { teamId: optTeamId, projectId: optProjectId }, async ({ teamId, projectId }) => {
+        const tid = resolveTeam(teamId);
+        const pid = resolveProject(projectId);
+        const tasks = await client.searchTasks(tid, pid, { aiStatus: "QUEUED,PROCESSING" });
+        return tasks.length > 0
+            ? text(tasks.map(compactTask))
+            : textMsg("No tasks in AI queue.");
     });
 }
 //# sourceMappingURL=tools.js.map

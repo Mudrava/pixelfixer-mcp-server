@@ -55,7 +55,7 @@ const client = new PixelFixerClient(API_URL, API_TOKEN);
 // Create MCP server
 const server = new McpServer({
     name: "pixelfixer",
-    version: "0.1.0",
+    version: "1.0.0",
 });
 // Register all tools
 registerTools(server, client);

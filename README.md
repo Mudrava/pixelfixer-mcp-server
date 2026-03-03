@@ -8,14 +8,21 @@ This MCP server gives AI agents full access to your PixelFixer workspace:
 
 | Category | Tools |
 |---|---|
+| **Session** | `init_session`, `set_context` |
 | **Teams & Projects** | `list_teams`, `list_projects`, `get_project`, `list_team_members` |
-| **Tasks** | `list_tasks`, `get_task`, `create_task`, `update_task`, `search_tasks` |
+| **Tasks** | `list_tasks`, `get_task`, `create_task`, `update_task`, `move_task`, `search_tasks` |
 | **Comments** | `add_comment`, `list_comments` |
 | **Kanban** | `list_columns` |
-| **GitHub** | `get_github_context`, `get_repo_tree`, `get_file_content`, `create_pull_request` |
-| **AI Pipeline** | `list_ai_queue`, `complete_ai_task`, `get_task_context` |
+| **GitHub** | `get_github_context`, `get_repo_tree`, `get_file_content`, `create_pull_request`, `commit_files` |
+| **AI Pipeline** | `start_task`, `complete_ai_task`, `list_ai_queue` |
 
-The `get_task_context` super-tool returns everything an AI needs in a single call: task details, description, screenshot URL, browser info, console/network errors, comments, and the connected GitHub repo file tree.
+### v1.0 highlights
+
+- **Session context** — call `init_session` once; all tools auto-use your team/project IDs
+- **Task numbers** — `get_task`, `start_task`, etc. accept `taskNumber: 42` instead of raw IDs
+- **Compact responses** — list views return summaries (~90% fewer tokens than v0.2)
+- **Retry & timeout** — automatic retry with backoff on 429/5xx, 30s request timeout
+- **Better errors** — human-readable messages that help AI self-correct
 
 ## Quick Start
 
@@ -62,10 +69,10 @@ Go to **PixelFixer → Team Settings → API Tokens** and create a token with `r
 ### 3. Start using it
 
 Ask your AI agent:
-- *"List all tasks in my project"*
-- *"Get the context for task PF-42 and create a fix"*
+- *"Check my PixelFixer tasks and fix what's in the AI queue"*
+- *"Start task #42 and fix it"*
 - *"Search for high-priority open bugs"*
-- *"Create a PR that fixes the button color issue from PF-15"*
+- *"Create a PR that fixes the button color issue from task #15"*
 
 ## Environment Variables
 
@@ -102,13 +109,11 @@ Then point your IDE to the local file:
 
 ## Tool Reference
 
-### get_task_context
-The recommended first call when working on a task. Returns in a single response:
-- Full task details (title, description, priority, status)
-- Screenshot URL, page URL, CSS selector
-- Browser info, console errors, network errors
-- All comments
-- Connected GitHub repo info + root file tree
+### init_session
+The recommended first call in every session. Auto-discovers your team and project (if you have exactly one of each), sets the session context, and returns the AI task queue as compact summaries. After this, all tools auto-fill teamId/projectId.
+
+### start_task
+Start working on an AI task. Moves the task to In Progress, sets AI status to PROCESSING, and returns full context: task details, comments, GitHub info, columns, and a workflow guide. Accepts `taskId` or `taskNumber`.
 
 ### search_tasks
 Search with multiple filters:

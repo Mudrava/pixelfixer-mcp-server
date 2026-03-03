@@ -1,11 +1,25 @@
 /**
  * PixelFixer API client for MCP server.
+ *
  * Communicates with the PixelFixer web API using a Personal API Token.
+ * Features:
+ *   - Automatic retry with exponential backoff for 429/5xx errors
+ *   - Request timeout (30 s)
+ *   - Human-readable error messages
+ *   - Helper to resolve task by human-readable number
  */
+export interface ClientOptions {
+    maxRetries?: number;
+    retryBaseMs?: number;
+    timeoutMs?: number;
+}
 export declare class PixelFixerClient {
     private baseUrl;
     private token;
-    constructor(baseUrl: string, token: string);
+    private maxRetries;
+    private retryBaseMs;
+    private timeoutMs;
+    constructor(baseUrl: string, token: string, options?: ClientOptions);
     private request;
     listTeams(): Promise<Team[]>;
     listMembers(teamId: string): Promise<TeamMember[]>;
@@ -13,6 +27,11 @@ export declare class PixelFixerClient {
     getProject(teamId: string, projectId: string): Promise<Project>;
     listTasks(teamId: string, projectId: string): Promise<Task[]>;
     getTask(teamId: string, projectId: string, taskId: string): Promise<Task>;
+    /**
+     * Resolve a human-readable task number (e.g. 43) to a task ID.
+     * Searches tasks and returns the one with an exact taskNumber match.
+     */
+    resolveTaskByNumber(teamId: string, projectId: string, taskNumber: number): Promise<Task>;
     createTask(teamId: string, projectId: string, data: CreateTaskInput): Promise<Task>;
     updateTask(teamId: string, projectId: string, taskId: string, data: TaskUpdate): Promise<Task>;
     searchTasks(teamId: string, projectId: string, filters: SearchFilters): Promise<Task[]>;
@@ -113,6 +132,19 @@ export interface Task {
     };
     comments?: Comment[];
 }
+/** Compact task summary for list views — saves ~90% tokens vs full Task */
+export interface TaskSummary {
+    id: string;
+    taskNumber: number | null;
+    title: string;
+    status: string;
+    priority: string;
+    aiStatus: string;
+    column: string | null;
+    tags: string[];
+    assignee: string | null;
+}
+export declare function compactTask(t: Task): TaskSummary;
 export interface CreateTaskInput {
     title: string;
     description?: string;

@@ -1,48 +1,111 @@
 /**
  * PixelFixer API client for MCP server.
+ *
  * Communicates with the PixelFixer web API using a Personal API Token.
+ * Features:
+ *   - Automatic retry with exponential backoff for 429/5xx errors
+ *   - Request timeout (30 s)
+ *   - Human-readable error messages
+ *   - Helper to resolve task by human-readable number
  */
+
+const DEFAULT_MAX_RETRIES = 3;
+const DEFAULT_TIMEOUT_MS = 30_000;
+const DEFAULT_RETRY_BASE_MS = 1_000;
+
+export interface ClientOptions {
+    maxRetries?: number;
+    retryBaseMs?: number;
+    timeoutMs?: number;
+}
 
 export class PixelFixerClient {
     private baseUrl: string;
     private token: string;
+    private maxRetries: number;
+    private retryBaseMs: number;
+    private timeoutMs: number;
 
-    constructor(baseUrl: string, token: string) {
+    constructor(baseUrl: string, token: string, options?: ClientOptions) {
         this.baseUrl = baseUrl.replace(/\/+$/, "");
         this.token = token;
+        this.maxRetries = options?.maxRetries ?? DEFAULT_MAX_RETRIES;
+        this.retryBaseMs = options?.retryBaseMs ?? DEFAULT_RETRY_BASE_MS;
+        this.timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     }
+
+    // ─── Core request with retry + timeout ───────────────────
 
     private async request<T>(path: string, options: RequestInit = {}): Promise<T> {
         const url = `${this.baseUrl}${path}`;
-        const res = await fetch(url, {
-            ...options,
-            headers: {
-                "Content-Type": "application/json",
-                Authorization: `Bearer ${this.token}`,
-                ...options.headers,
-            },
-        });
+        let lastError: Error | null = null;
 
-        if (!res.ok) {
-            const body = await res.text().catch(() => "");
-            throw new Error(`PixelFixer API error ${res.status}: ${body}`);
+        for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
+            try {
+                const controller = new AbortController();
+                const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+
+                const res = await fetch(url, {
+                    ...options,
+                    signal: controller.signal,
+                    headers: {
+                        "Content-Type": "application/json",
+                        Authorization: `Bearer ${this.token}`,
+                        ...options.headers,
+                    },
+                });
+
+                clearTimeout(timer);
+
+                // Retry on 429 (rate-limit) or 5xx (server error)
+                if ((res.status === 429 || res.status >= 500) && attempt < this.maxRetries) {
+                    const delay = this.retryBaseMs * Math.pow(2, attempt);
+                    await new Promise((r) => setTimeout(r, delay));
+                    continue;
+                }
+
+                if (!res.ok) {
+                    const body = await res.text().catch(() => "");
+                    throw new Error(friendlyError(res.status, body, path));
+                }
+
+                return res.json() as Promise<T>;
+            } catch (err) {
+                if (err instanceof DOMException && err.name === "AbortError") {
+                    lastError = new Error(`Request timed out after ${this.timeoutMs / 1000}s: ${path}`);
+                    if (attempt < this.maxRetries) {
+                        await new Promise((r) => setTimeout(r, this.retryBaseMs * Math.pow(2, attempt)));
+                        continue;
+                    }
+                } else if (err instanceof TypeError && attempt < this.maxRetries) {
+                    // Network error — retry
+                    lastError = err as Error;
+                    await new Promise((r) => setTimeout(r, this.retryBaseMs * Math.pow(2, attempt)));
+                    continue;
+                } else {
+                    throw err;
+                }
+            }
         }
 
-        return res.json() as Promise<T>;
+        throw lastError ?? new Error(`Request failed after ${this.maxRetries} retries: ${path}`);
     }
 
     // ─── Teams ───────────────────────────────────────────────
+
     async listTeams(): Promise<Team[]> {
         return this.request<Team[]>("/api/teams");
     }
 
     // ─── Members ─────────────────────────────────────────────
+
     async listMembers(teamId: string): Promise<TeamMember[]> {
         const data = await this.request<{ user: TeamMember }[]>(`/api/teams/${teamId}/members`);
         return data.map((m) => m.user);
     }
 
     // ─── Projects ────────────────────────────────────────────
+
     async listProjects(teamId: string): Promise<Project[]> {
         return this.request<Project[]>(`/api/teams/${teamId}/projects`);
     }
@@ -50,11 +113,12 @@ export class PixelFixerClient {
     async getProject(teamId: string, projectId: string): Promise<Project> {
         const projects = await this.listProjects(teamId);
         const proj = projects.find((p) => p.id === projectId);
-        if (!proj) throw new Error(`Project ${projectId} not found`);
+        if (!proj) throw new Error(`Project ${projectId} not found in team ${teamId}. Use list_projects to see available projects.`);
         return proj;
     }
 
     // ─── Tasks ───────────────────────────────────────────────
+
     async listTasks(teamId: string, projectId: string): Promise<Task[]> {
         const data = await this.request<{ tasks: Task[] }>(`/api/teams/${teamId}/projects/${projectId}/tasks`);
         return data.tasks;
@@ -62,6 +126,19 @@ export class PixelFixerClient {
 
     async getTask(teamId: string, projectId: string, taskId: string): Promise<Task> {
         return this.request<Task>(`/api/teams/${teamId}/projects/${projectId}/tasks/${taskId}`);
+    }
+
+    /**
+     * Resolve a human-readable task number (e.g. 43) to a task ID.
+     * Searches tasks and returns the one with an exact taskNumber match.
+     */
+    async resolveTaskByNumber(teamId: string, projectId: string, taskNumber: number): Promise<Task> {
+        const tasks = await this.searchTasks(teamId, projectId, { q: String(taskNumber), limit: 20 });
+        const match = tasks.find((t) => t.taskNumber === taskNumber);
+        if (!match) {
+            throw new Error(`Task #${taskNumber} not found. Check that the task number is correct.`);
+        }
+        return match;
     }
 
     async createTask(teamId: string, projectId: string, data: CreateTaskInput): Promise<Task> {
@@ -109,6 +186,7 @@ export class PixelFixerClient {
     }
 
     // ─── Comments ────────────────────────────────────────────
+
     async addComment(teamId: string, projectId: string, taskId: string, content: string): Promise<Comment> {
         return this.request<Comment>(`/api/teams/${teamId}/projects/${projectId}/tasks/${taskId}/comments`, {
             method: "POST",
@@ -121,11 +199,13 @@ export class PixelFixerClient {
     }
 
     // ─── Columns / Board ─────────────────────────────────────
+
     async listColumns(teamId: string, projectId: string): Promise<Column[]> {
         return this.request<Column[]>(`/api/teams/${teamId}/projects/${projectId}/columns`);
     }
 
     // ─── GitHub Context ──────────────────────────────────────
+
     async getGitHubConnection(teamId: string, projectId: string): Promise<GitHubConnection | null> {
         try {
             const data = await this.request<{ configured: boolean; connection: GitHubConnection | null }>(
@@ -177,6 +257,7 @@ export class PixelFixerClient {
     }
 
     // ─── AI Callback ─────────────────────────────────────────
+
     async reportAiResult(
         teamId: string,
         projectId: string,
@@ -190,6 +271,20 @@ export class PixelFixerClient {
                 body: JSON.stringify(data),
             },
         );
+    }
+}
+
+// ─── Helpers ─────────────────────────────────────────────────
+
+function friendlyError(status: number, body: string, path: string): string {
+    const detail = body ? `: ${body.slice(0, 200)}` : "";
+    switch (status) {
+        case 401: return `Authentication failed (401). Check your PIXELFIXER_API_TOKEN.${detail}`;
+        case 403: return `Access denied (403). Your token may lack the required scope.${detail}`;
+        case 404: return `Not found (404) — ${path}. Check that the ID is correct.${detail}`;
+        case 422: return `Validation error (422)${detail}`;
+        case 429: return `Rate limited (429). Try again later.${detail}`;
+        default:  return `API error ${status} — ${path}${detail}`;
     }
 }
 
@@ -242,6 +337,33 @@ export interface Task {
     assignee?: { id: string; name: string | null; email: string } | null;
     column?: { id: string; name: string; color: string };
     comments?: Comment[];
+}
+
+/** Compact task summary for list views — saves ~90% tokens vs full Task */
+export interface TaskSummary {
+    id: string;
+    taskNumber: number | null;
+    title: string;
+    status: string;
+    priority: string;
+    aiStatus: string;
+    column: string | null;
+    tags: string[];
+    assignee: string | null;
+}
+
+export function compactTask(t: Task): TaskSummary {
+    return {
+        id: t.id,
+        taskNumber: t.taskNumber,
+        title: t.title,
+        status: t.status,
+        priority: t.priority,
+        aiStatus: t.aiStatus,
+        column: t.column?.name ?? null,
+        tags: t.tags?.map((tt) => tt.tag.name) ?? [],
+        assignee: t.assignee?.name ?? t.assignee?.email ?? null,
+    };
 }
 
 export interface CreateTaskInput {

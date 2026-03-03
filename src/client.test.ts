@@ -1,16 +1,18 @@
 /**
  * Comprehensive tests for the PixelFixer MCP client.
  *
- * Tests every method with mocked HTTP responses to ensure:
+ * v1.0 tests cover:
  *  - Correct URL construction
- *  - Correct HTTP method
- *  - Correct headers (Authorization, Content-Type)
- *  - Correct body serialization
- *  - Correct response parsing
- *  - Error handling for non-2xx responses
+ *  - Correct HTTP method and headers
+ *  - Correct body serialization and response parsing
+ *  - Friendly error messages (401, 403, 404, 422, generic)
+ *  - resolveTaskByNumber helper
+ *  - compactTask helper
+ *  - Retry behaviour for transient errors (429, 5xx)
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { PixelFixerClient } from "./client.js";
+import { PixelFixerClient, compactTask } from "./client.js";
+import type { Task } from "./client.js";
 
 // ─── Mocked fetch ────────────────────────────────────────────────
 
@@ -58,9 +60,9 @@ describe("listTeams", () => {
         expect(result).toEqual(teams);
     });
 
-    it("throws on 401", async () => {
+    it("throws friendly error on 401", async () => {
         mockFetch.mockResolvedValueOnce(mockResponse({ error: "Unauthorized" }, 401));
-        await expect(client.listTeams()).rejects.toThrow("PixelFixer API error 401");
+        await expect(client.listTeams()).rejects.toThrow("Authentication failed (401)");
     });
 });
 
@@ -77,7 +79,7 @@ describe("listMembers", () => {
         const result = await client.listMembers("t1");
 
         expect(mockFetch.mock.calls[0][0]).toBe(`${BASE_URL}/api/teams/t1/members`);
-        expect(result).toEqual([data[0].user, data[1].user]);
+        expect(result).toEqual([data[0]!.user, data[1]!.user]);
     });
 });
 
@@ -219,6 +221,30 @@ describe("searchTasks", () => {
         expect(url).toContain("q=bug");
         expect(url).not.toContain("status=");
         expect(url).not.toContain("priority=");
+    });
+});
+
+// ─── resolveTaskByNumber ─────────────────────────────────────────
+
+describe("resolveTaskByNumber", () => {
+    it("finds task by exact taskNumber match", async () => {
+        const tasks = [
+            { id: "task1", taskNumber: 42, title: "Fix login" },
+            { id: "task2", taskNumber: 43, title: "Fix logout" },
+        ];
+        mockFetch.mockResolvedValueOnce(mockResponse({ tasks }));
+
+        const result = await client.resolveTaskByNumber("t1", "p1", 43);
+
+        expect(result).toEqual(tasks[1]);
+        const url: string = mockFetch.mock.calls[0][0];
+        expect(url).toContain("q=43");
+    });
+
+    it("throws if task number not found", async () => {
+        mockFetch.mockResolvedValueOnce(mockResponse({ tasks: [] }));
+
+        await expect(client.resolveTaskByNumber("t1", "p1", 999)).rejects.toThrow("Task #999 not found");
     });
 });
 
@@ -408,29 +434,112 @@ describe("startTask", () => {
 
     it("throws on 400 when task is not queued", async () => {
         mockFetch.mockResolvedValueOnce(mockResponse({ error: "Task is not in QUEUED status" }, 400));
-        await expect(client.startTask("t1", "p1", "task1")).rejects.toThrow("PixelFixer API error 400");
+        await expect(client.startTask("t1", "p1", "task1")).rejects.toThrow("API error 400");
+    });
+});
+
+// ─── compactTask helper ──────────────────────────────────────────
+
+describe("compactTask", () => {
+    it("returns only summary fields", () => {
+        const fullTask: Task = {
+            id: "task1",
+            taskNumber: 42,
+            title: "Fix login page",
+            description: "Long description here...",
+            status: "IN_PROGRESS",
+            priority: "HIGH",
+            aiStatus: "PROCESSING",
+            aiPrUrl: null,
+            columnId: "col1",
+            projectId: "p1",
+            source: "EXTENSION",
+            pageUrl: "https://example.com/login",
+            selector: ".btn-login",
+            screenshotUrl: "https://cdn.example.com/shot.png",
+            browserInfo: { browser: "Chrome" },
+            consoleErrors: [{ message: "TypeError" }],
+            networkErrors: [],
+            metadata: {},
+            createdAt: "2026-01-01T00:00:00Z",
+            updatedAt: "2026-01-02T00:00:00Z",
+            tags: [{ tag: { id: "tag1", name: "frontend", color: "#f00" } }],
+            assignee: { id: "u1", name: "Alice", email: "alice@test.com" },
+            column: { id: "col1", name: "In Progress", color: "#0ff" },
+        };
+
+        const summary = compactTask(fullTask);
+
+        expect(summary).toEqual({
+            id: "task1",
+            taskNumber: 42,
+            title: "Fix login page",
+            status: "IN_PROGRESS",
+            priority: "HIGH",
+            aiStatus: "PROCESSING",
+            column: "In Progress",
+            tags: ["frontend"],
+            assignee: "Alice",
+        });
+    });
+
+    it("handles missing optional fields", () => {
+        const minTask: Task = {
+            id: "task2",
+            taskNumber: null,
+            title: "Bare task",
+            description: null,
+            status: "OPEN",
+            priority: "LOW",
+            aiStatus: "NONE",
+            aiPrUrl: null,
+            columnId: "col1",
+            projectId: "p1",
+            source: "WEB",
+            pageUrl: null,
+            selector: null,
+            screenshotUrl: null,
+            browserInfo: null,
+            consoleErrors: null,
+            networkErrors: null,
+            metadata: null,
+            createdAt: "2026-01-01T00:00:00Z",
+            updatedAt: "2026-01-01T00:00:00Z",
+        };
+
+        const summary = compactTask(minTask);
+
+        expect(summary.column).toBeNull();
+        expect(summary.tags).toEqual([]);
+        expect(summary.assignee).toBeNull();
     });
 });
 
 // ─── Error handling ──────────────────────────────────────────────
 
 describe("error handling", () => {
-    it("includes status code and body in error message", async () => {
+    it("returns friendly message with body for 403", async () => {
         mockFetch.mockResolvedValueOnce(mockResponse({ error: "Forbidden" }, 403));
+        await expect(client.listTeams()).rejects.toThrow("Access denied (403)");
+    });
 
-        await expect(client.listTeams()).rejects.toThrow(
-            'PixelFixer API error 403: {"error":"Forbidden"}',
-        );
+    it("returns friendly message for 404", async () => {
+        mockFetch.mockResolvedValueOnce(mockResponse({ error: "Not found" }, 404));
+        await expect(client.getTask("t1", "p1", "missing")).rejects.toThrow("Not found (404)");
+    });
+
+    it("returns validation error for 422", async () => {
+        mockFetch.mockResolvedValueOnce(mockResponse({ error: "Invalid input" }, 422));
+        await expect(client.createTask("t1", "p1", {} as any)).rejects.toThrow("Validation error (422)");
     });
 
     it("handles empty error body gracefully", async () => {
         mockFetch.mockResolvedValueOnce({
             ok: false,
-            status: 500,
+            status: 400,
             text: () => Promise.resolve(""),
         });
-
-        await expect(client.listTeams()).rejects.toThrow("PixelFixer API error 500:");
+        await expect(client.listTeams()).rejects.toThrow("API error 400");
     });
 
     it("strips trailing slash from base URL", () => {
@@ -438,5 +547,55 @@ describe("error handling", () => {
         mockFetch.mockResolvedValueOnce(mockResponse([]));
         c.listTeams();
         expect(mockFetch.mock.calls[0][0]).toBe("https://app.test.com/api/teams");
+    });
+});
+
+// ─── Retry behaviour ────────────────────────────────────────────
+
+describe("retry", () => {
+    let retryClient: PixelFixerClient;
+
+    beforeEach(() => {
+        retryClient = new PixelFixerClient(BASE_URL, TOKEN, { retryBaseMs: 0, timeoutMs: 60_000 });
+    });
+
+    it("retries on 429 and succeeds", async () => {
+        const teams = [{ id: "t1", name: "Team" }];
+        mockFetch
+            .mockResolvedValueOnce(mockResponse({}, 429))
+            .mockResolvedValueOnce(mockResponse(teams));
+
+        const result = await retryClient.listTeams();
+
+        expect(result).toEqual(teams);
+        expect(mockFetch).toHaveBeenCalledTimes(2);
+    });
+
+    it("retries on 500 and succeeds on second attempt", async () => {
+        const teams = [{ id: "t1", name: "Team" }];
+        mockFetch
+            .mockResolvedValueOnce(mockResponse({}, 500))
+            .mockResolvedValueOnce(mockResponse(teams));
+
+        const result = await retryClient.listTeams();
+
+        expect(result).toEqual(teams);
+        expect(mockFetch).toHaveBeenCalledTimes(2);
+    });
+
+    it("throws after exhausting retries on 500", async () => {
+        for (let i = 0; i < 4; i++) {
+            mockFetch.mockResolvedValueOnce(mockResponse({ error: "Server Error" }, 500));
+        }
+
+        await expect(retryClient.listTeams()).rejects.toThrow("API error 500");
+        expect(mockFetch).toHaveBeenCalledTimes(4);
+    });
+
+    it("does NOT retry on 401", async () => {
+        mockFetch.mockResolvedValueOnce(mockResponse({}, 401));
+
+        await expect(retryClient.listTeams()).rejects.toThrow("Authentication failed (401)");
+        expect(mockFetch).toHaveBeenCalledTimes(1);
     });
 });
