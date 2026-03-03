@@ -1,6 +1,6 @@
 {
     "name": "@mudravaorg/mcp-server",
-    "version": "0.1.4",
+    "version": "0.1.6",
     "type": "module",
     "description": "PixelFixer MCP server – exposes kanban tasks, GitHub context, and AI actions to MCP-compatible AI agents (Claude, Cursor, VS Code, Windsurf)",
     "keywords": [

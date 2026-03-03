@@ -326,7 +326,11 @@ describe("tool execution", () => {
         });
     });
 
-    it("get_task_context aggregates task, comments, and github", async () => {
+    it("get_task_context aggregates task, comments, github, columns, and workflow", async () => {
+        (mockClient as any).listColumns.mockResolvedValueOnce([
+            { id: "col1", name: "Backlog", isAiReview: false },
+            { id: "col2", name: "Review", isAiReview: true },
+        ]);
         const result = await getTool("get_task_context").handler({
             teamId: "t1",
             projectId: "p1",
@@ -334,6 +338,7 @@ describe("tool execution", () => {
         });
         expect(mockClient.getTask).toHaveBeenCalledWith("t1", "p1", "task1");
         expect(mockClient.getGitHubConnection).toHaveBeenCalledWith("t1", "p1");
+        expect(mockClient.listColumns).toHaveBeenCalledWith("t1", "p1");
 
         const parsed = JSON.parse(result.content[0].text);
         expect(parsed.task).toBeDefined();
@@ -341,6 +346,13 @@ describe("tool execution", () => {
         expect(parsed.comments).toEqual([]);
         expect(parsed.github).toBeDefined();
         expect(parsed.github.repoFullName).toBe("org/repo");
+        expect(parsed.columns).toHaveLength(2);
+        expect(parsed.reviewColumnId).toBe("col2");
+        expect(parsed.workflow).toBeDefined();
+        expect(parsed.workflow.length).toBeGreaterThan(0);
+        expect(parsed.workflow[0]).toContain("REQUIRED WORKFLOW");
+        // With GitHub connected, workflow should mention commit_files
+        expect(parsed.workflow.some((s: string) => s.includes("commit_files"))).toBe(true);
     });
 
     it("get_task_context works without github connection", async () => {
@@ -352,5 +364,21 @@ describe("tool execution", () => {
         });
         const parsed = JSON.parse(result.content[0].text);
         expect(parsed.github).toBeNull();
+        expect(parsed.workflow).toBeDefined();
+        // Without GitHub, workflow should NOT mention commit_files
+        expect(parsed.workflow.some((s: string) => s.includes("commit_files"))).toBe(false);
+    });
+
+    it("get_task_context returns null reviewColumnId when no review column", async () => {
+        (mockClient as any).listColumns.mockResolvedValueOnce([
+            { id: "col1", name: "Backlog", isAiReview: false },
+        ]);
+        const result = await getTool("get_task_context").handler({
+            teamId: "t1",
+            projectId: "p1",
+            taskId: "task1",
+        });
+        const parsed = JSON.parse(result.content[0].text);
+        expect(parsed.reviewColumnId).toBeNull();
     });
 });

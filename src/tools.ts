@@ -432,7 +432,7 @@ export function registerTools(server: McpServer, client: PixelFixerClient): void
     // ─── complete_ai_task ────────────────────────────────────
     server.tool(
         "complete_ai_task",
-        "Report the result of AI work on a task. Call this when you have finished working on a task to update its AI status and optionally attach a PR URL and summary comment. IMPORTANT: message/summary MUST be in English regardless of the user's language.",
+        "Report the result of AI work on a task. Call this AFTER you have committed code via commit_files and created a PR via create_pull_request. The task will be automatically moved to the AI review column if one is configured. IMPORTANT: message/summary MUST be in English regardless of the user's language.",
         {
             teamId: z.string().describe("Team ID"),
             projectId: z.string().describe("Project ID"),
@@ -456,7 +456,7 @@ export function registerTools(server: McpServer, client: PixelFixerClient): void
     // ─── list_ai_queue ───────────────────────────────────────
     server.tool(
         "list_ai_queue",
-        "List tasks that are queued or in-progress for AI processing. Useful to find work that needs to be done.",
+        "List tasks that are queued or in-progress for AI processing. For EACH task, you MUST call get_task_context first to get the full details and required workflow before starting work.",
         {
             teamId: z.string().describe("Team ID"),
             projectId: z.string().describe("Project ID"),
@@ -481,16 +481,17 @@ export function registerTools(server: McpServer, client: PixelFixerClient): void
     // ─── get_task_context ────────────────────────────────────
     server.tool(
         "get_task_context",
-        "Get comprehensive context for an AI task in a single call. Returns: full task details (description, screenshot, page URL, browser info, console errors, network errors), all comments, GitHub repo info, and the project file tree. This is the recommended first call when starting work on a task.",
+        "Get comprehensive context for an AI task in a single call. Returns: full task details, comments, GitHub repo info, project file tree, kanban columns (including AI review column), and the REQUIRED WORKFLOW you must follow. This is the MANDATORY first call when starting work on a task.",
         {
             teamId: z.string().describe("Team ID"),
             projectId: z.string().describe("Project ID"),
             taskId: z.string().describe("Task ID"),
         },
         async ({ teamId, projectId, taskId }) => {
-            const [task, github] = await Promise.all([
+            const [task, github, columns] = await Promise.all([
                 client.getTask(teamId, projectId, taskId),
                 client.getGitHubConnection(teamId, projectId),
+                client.listColumns(teamId, projectId),
             ]);
 
             // Try to get repo tree if GitHub is connected
@@ -500,6 +501,11 @@ export function registerTools(server: McpServer, client: PixelFixerClient): void
                     repoTree = await client.getRepoTree(teamId, projectId);
                 } catch { /* repo tree optional */ }
             }
+
+            // Find AI review column
+            const reviewColumn = Array.isArray(columns)
+                ? columns.find((c: any) => c.isAiReview === true)
+                : null;
 
             const context = {
                 task: {
@@ -531,6 +537,28 @@ export function registerTools(server: McpServer, client: PixelFixerClient): void
                         fileTree: repoTree?.items ?? null,
                     }
                     : null,
+                columns: columns ?? [],
+                reviewColumnId: reviewColumn ? reviewColumn.id : null,
+                workflow: github
+                    ? [
+                        "REQUIRED WORKFLOW — follow these steps IN ORDER:",
+                        "1. Read and understand the task description, screenshot, and any console/network errors.",
+                        "2. Use get_repo_tree and get_file_content to explore the codebase and find relevant files.",
+                        "3. Use create_pull_request to create a new branch and PR (branch name: fix/PF-{taskNumber}-short-description).",
+                        "4. Use commit_files to commit your code changes to the new branch. Do NOT edit files locally.",
+                        "5. Use add_comment to leave a summary of what you changed (in English).",
+                        "6. Use complete_ai_task with status COMPLETED and the PR URL — the task will be auto-moved to the review column.",
+                        "IMPORTANT: ALL text (PR titles, commit messages, comments, descriptions) MUST be in English.",
+                        "IMPORTANT: Do NOT use local file editing. ALL code changes must go through commit_files.",
+                    ]
+                    : [
+                        "REQUIRED WORKFLOW — follow these steps IN ORDER:",
+                        "1. Read and understand the task description, screenshot, and any console/network errors.",
+                        "2. No GitHub repository is connected — make changes locally using your IDE tools.",
+                        "3. Use add_comment to describe what you changed (in English).",
+                        "4. Use complete_ai_task with status COMPLETED — the task will be auto-moved to the review column.",
+                        "IMPORTANT: ALL text (comments, descriptions) MUST be in English.",
+                    ],
             };
 
             return {
