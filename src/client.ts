@@ -94,6 +94,13 @@ export class PixelFixerClient {
         return data.tasks;
     }
 
+    async moveTask(teamId: string, projectId: string, taskId: string, columnId: string, position = 0): Promise<{ success: boolean }> {
+        return this.request<{ success: boolean }>(`/api/teams/${teamId}/projects/${projectId}/tasks/${taskId}/move`, {
+            method: "POST",
+            body: JSON.stringify({ columnId, position }),
+        });
+    }
+
     // ─── Comments ────────────────────────────────────────────
     async addComment(teamId: string, projectId: string, taskId: string, content: string): Promise<Comment> {
         return this.request<Comment>(`/api/teams/${teamId}/projects/${projectId}/tasks/${taskId}/comments`, {
@@ -147,6 +154,17 @@ export class PixelFixerClient {
     ): Promise<{ branch: string; pullRequest: { url: string; number: number } }> {
         return this.request(
             `/api/teams/${teamId}/projects/${projectId}/github/pr`,
+            { method: "POST", body: JSON.stringify(data) },
+        );
+    }
+
+    async commitFiles(
+        teamId: string,
+        projectId: string,
+        data: { branch: string; message: string; files: { path: string; content: string }[] },
+    ): Promise<{ success: boolean; sha: string; url: string }> {
+        return this.request(
+            `/api/teams/${teamId}/projects/${projectId}/github/commit`,
             { method: "POST", body: JSON.stringify(data) },
         );
     }
@@ -238,7 +256,6 @@ export interface TaskUpdate {
     priority?: string;
     aiStatus?: string;
     aiPrUrl?: string;
-    columnId?: string;
     assigneeId?: string | null;
 }
 

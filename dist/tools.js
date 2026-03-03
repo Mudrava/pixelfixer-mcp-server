@@ -5,10 +5,10 @@
  *
  * Tools:
  *  - list_teams, list_projects, get_project
- *  - list_tasks, get_task, create_task, update_task, search_tasks
+ *  - list_tasks, get_task, create_task, update_task, move_task, search_tasks
  *  - add_comment, list_comments
  *  - list_columns, list_team_members
- *  - get_github_context, get_repo_tree, get_file_content, create_pull_request
+ *  - get_github_context, get_repo_tree, get_file_content, create_pull_request, commit_files
  *  - complete_ai_task, list_ai_queue, get_task_context
  */
 import { z } from "zod";
@@ -79,7 +79,7 @@ export function registerTools(server, client) {
         };
     });
     // ─── create_task ─────────────────────────────────────────
-    server.tool("create_task", "Create a new task in a project. Requires at least a title and columnId. Can optionally set description, priority, assignee, tags, and more.", {
+    server.tool("create_task", "Create a new task in a project. Requires at least a title and columnId. Can optionally set description, priority, assignee, tags, and more. IMPORTANT: title and description MUST be written in English regardless of the user's language.", {
         teamId: z.string().describe("Team ID"),
         projectId: z.string().describe("Project ID"),
         title: z.string().describe("Task title"),
@@ -101,7 +101,7 @@ export function registerTools(server, client) {
         };
     });
     // ─── update_task ─────────────────────────────────────────
-    server.tool("update_task", "Update a task's title, description, status, priority, assignee, AI status, or move it to another column", {
+    server.tool("update_task", "Update a task's properties: title, description, status, priority, assignee, or AI status. NOTE: To move a task to another column, use the move_task tool instead. IMPORTANT: title and description MUST be written in English regardless of the user's language.", {
         teamId: z.string().describe("Team ID"),
         projectId: z.string().describe("Project ID"),
         taskId: z.string().describe("Task ID"),
@@ -109,7 +109,6 @@ export function registerTools(server, client) {
         description: z.string().optional().describe("New description"),
         status: z.string().optional().describe("New status (OPEN, IN_PROGRESS, RESOLVED, CLOSED)"),
         priority: z.string().optional().describe("New priority (LOW, MEDIUM, HIGH, CRITICAL)"),
-        columnId: z.string().optional().describe("Move task to this column ID"),
         assigneeId: z.string().optional().describe("Assign to this user ID (empty string to unassign)"),
         aiStatus: z.string().optional().describe("Set AI status (NONE, QUEUED, PROCESSING)"),
     }, async ({ teamId, projectId, taskId, ...updates }) => {
@@ -121,6 +120,19 @@ export function registerTools(server, client) {
         const task = await client.updateTask(teamId, projectId, taskId, data);
         return {
             content: [{ type: "text", text: JSON.stringify(task, null, 2) }],
+        };
+    });
+    // ─── move_task ────────────────────────────────────────────
+    server.tool("move_task", "Move a task to a different kanban column. Use list_columns to get available column IDs. Position 0 = top of column.", {
+        teamId: z.string().describe("Team ID"),
+        projectId: z.string().describe("Project ID"),
+        taskId: z.string().describe("Task ID"),
+        columnId: z.string().describe("Target column ID to move the task to"),
+        position: z.number().optional().describe("Position within the column (0 = top, default: 0)"),
+    }, async ({ teamId, projectId, taskId, columnId, position }) => {
+        const result = await client.moveTask(teamId, projectId, taskId, columnId, position ?? 0);
+        return {
+            content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
         };
     });
     // ─── search_tasks ────────────────────────────────────────
@@ -149,7 +161,7 @@ export function registerTools(server, client) {
         };
     });
     // ─── add_comment ─────────────────────────────────────────
-    server.tool("add_comment", "Add a comment to a task. Use this to leave progress notes, ask questions, or report findings.", {
+    server.tool("add_comment", "Add a comment to a task. Use this to leave progress notes, ask questions, or report findings. IMPORTANT: comment content MUST be written in English regardless of the user's language.", {
         teamId: z.string().describe("Team ID"),
         projectId: z.string().describe("Project ID"),
         taskId: z.string().describe("Task ID"),
@@ -246,7 +258,7 @@ export function registerTools(server, client) {
         }
     });
     // ─── create_pull_request ─────────────────────────────────
-    server.tool("create_pull_request", "Create a new branch and pull request in the connected GitHub repository. The branch is created from the base branch (default: repo default branch).", {
+    server.tool("create_pull_request", "Create a new branch and pull request in the connected GitHub repository. The branch is created from the base branch (default: repo default branch). IMPORTANT: PR title, description, and branch name MUST be in English regardless of the user's language.", {
         teamId: z.string().describe("Team ID"),
         projectId: z.string().describe("Project ID"),
         branchName: z.string().describe("Name for the new branch (e.g., 'fix/PF-42-button-color')"),
@@ -277,8 +289,41 @@ export function registerTools(server, client) {
             };
         }
     });
+    // ─── commit_files ──────────────────────────────────────────
+    server.tool("commit_files", "Commit one or more file changes to a branch in the connected GitHub repository. Use this after creating a branch (via create_pull_request) to push code changes. Maximum 50 files per commit. IMPORTANT: commit message MUST be in English regardless of the user's language.", {
+        teamId: z.string().describe("Team ID"),
+        projectId: z.string().describe("Project ID"),
+        branch: z.string().describe("Branch name to commit to (e.g., 'fix/PF-42-button-color')"),
+        message: z.string().describe("Commit message"),
+        files: z.array(z.object({
+            path: z.string().describe("File path in the repo (e.g., 'src/components/Footer.tsx')"),
+            content: z.string().describe("Full file content after changes"),
+        })).describe("Array of files to create or update"),
+    }, async ({ teamId, projectId, branch, message, files }) => {
+        try {
+            const result = await client.commitFiles(teamId, projectId, {
+                branch,
+                message,
+                files,
+            });
+            return {
+                content: [
+                    {
+                        type: "text",
+                        text: `Commit successful!\nSHA: ${result.sha}\nURL: ${result.url}`,
+                    },
+                ],
+            };
+        }
+        catch (err) {
+            return {
+                content: [{ type: "text", text: `Error: ${err.message}` }],
+                isError: true,
+            };
+        }
+    });
     // ─── complete_ai_task ────────────────────────────────────
-    server.tool("complete_ai_task", "Report the result of AI work on a task. Call this when you have finished working on a task to update its AI status and optionally attach a PR URL and summary comment.", {
+    server.tool("complete_ai_task", "Report the result of AI work on a task. Call this when you have finished working on a task to update its AI status and optionally attach a PR URL and summary comment. IMPORTANT: message/summary MUST be in English regardless of the user's language.", {
         teamId: z.string().describe("Team ID"),
         projectId: z.string().describe("Project ID"),
         taskId: z.string().describe("Task ID"),

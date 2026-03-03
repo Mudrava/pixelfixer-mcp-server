@@ -16,6 +16,9 @@ export declare class PixelFixerClient {
     createTask(teamId: string, projectId: string, data: CreateTaskInput): Promise<Task>;
     updateTask(teamId: string, projectId: string, taskId: string, data: TaskUpdate): Promise<Task>;
     searchTasks(teamId: string, projectId: string, filters: SearchFilters): Promise<Task[]>;
+    moveTask(teamId: string, projectId: string, taskId: string, columnId: string, position?: number): Promise<{
+        success: boolean;
+    }>;
     addComment(teamId: string, projectId: string, taskId: string, content: string): Promise<Comment>;
     listComments(teamId: string, projectId: string, taskId: string): Promise<Comment[]>;
     listColumns(teamId: string, projectId: string): Promise<Column[]>;
@@ -33,6 +36,18 @@ export declare class PixelFixerClient {
             url: string;
             number: number;
         };
+    }>;
+    commitFiles(teamId: string, projectId: string, data: {
+        branch: string;
+        message: string;
+        files: {
+            path: string;
+            content: string;
+        }[];
+    }): Promise<{
+        success: boolean;
+        sha: string;
+        url: string;
     }>;
     reportAiResult(teamId: string, projectId: string, taskId: string, data: AiCallbackData): Promise<{
         success: boolean;
@@ -115,7 +130,6 @@ export interface TaskUpdate {
     priority?: string;
     aiStatus?: string;
     aiPrUrl?: string;
-    columnId?: string;
     assigneeId?: string | null;
 }
 export interface SearchFilters {

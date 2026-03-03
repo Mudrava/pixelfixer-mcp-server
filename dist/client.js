@@ -86,6 +86,12 @@ export class PixelFixerClient {
         const data = await this.request(`/api/teams/${teamId}/projects/${projectId}/tasks/search?${params.toString()}`);
         return data.tasks;
     }
+    async moveTask(teamId, projectId, taskId, columnId, position = 0) {
+        return this.request(`/api/teams/${teamId}/projects/${projectId}/tasks/${taskId}/move`, {
+            method: "POST",
+            body: JSON.stringify({ columnId, position }),
+        });
+    }
     // ─── Comments ────────────────────────────────────────────
     async addComment(teamId, projectId, taskId, content) {
         return this.request(`/api/teams/${teamId}/projects/${projectId}/tasks/${taskId}/comments`, {
@@ -126,6 +132,9 @@ export class PixelFixerClient {
     }
     async createBranchAndPR(teamId, projectId, data) {
         return this.request(`/api/teams/${teamId}/projects/${projectId}/github/pr`, { method: "POST", body: JSON.stringify(data) });
+    }
+    async commitFiles(teamId, projectId, data) {
+        return this.request(`/api/teams/${teamId}/projects/${projectId}/github/commit`, { method: "POST", body: JSON.stringify(data) });
     }
     // ─── AI Callback ─────────────────────────────────────────
     async reportAiResult(teamId, projectId, taskId, data) {

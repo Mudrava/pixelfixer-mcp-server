@@ -9,14 +9,14 @@
  *   PIXELFIXER_API_URL   – Base URL of the PixelFixer instance (default: http://localhost:3000)
  *   PIXELFIXER_API_TOKEN – Personal API Token for authentication (required)
  *
- * One-time setup (from PixelFixer repo root):
- *   cd packages/mcp-server && npm run build && npm link
+ * Install: npx -y @mudravaorg/mcp-server
  *
  * Usage with VS Code (.vscode/mcp.json):
  *   {
  *     "servers": {
  *       "pixelfixer": {
- *         "command": "pixelfixer-mcp",
+ *         "command": "npx",
+ *         "args": ["-y", "@mudravaorg/mcp-server"],
  *         "env": {
  *           "PIXELFIXER_API_URL": "https://pixelfixer.mudrava.com",
  *           "PIXELFIXER_API_TOKEN": "pf_your_token_here"
@@ -29,7 +29,8 @@
  *   {
  *     "mcpServers": {
  *       "pixelfixer": {
- *         "command": "pixelfixer-mcp",
+ *         "command": "npx",
+ *         "args": ["-y", "@mudravaorg/mcp-server"],
  *         "env": {
  *           "PIXELFIXER_API_URL": "https://pixelfixer.mudrava.com",
  *           "PIXELFIXER_API_TOKEN": "pf_your_token_here"
