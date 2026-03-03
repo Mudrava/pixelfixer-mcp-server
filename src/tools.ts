@@ -9,7 +9,7 @@
  *  - add_comment, list_comments
  *  - list_columns, list_team_members
  *  - get_github_context, get_repo_tree, get_file_content, create_pull_request, commit_files
- *  - complete_ai_task, list_ai_queue, get_task_context
+ *  - complete_ai_task, list_ai_queue, get_task_context, start_task
  */
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -19,7 +19,7 @@ export function registerTools(server: McpServer, client: PixelFixerClient): void
     // ─── list_teams ──────────────────────────────────────────
     server.tool(
         "list_teams",
-        "List all teams the authenticated user belongs to",
+        "List all teams the authenticated user belongs to. AI TASK WORKFLOW: list_teams → list_projects → list_ai_queue → start_task (for each task) → work → complete_ai_task.",
         {},
         async () => {
             const teams = await client.listTeams();
@@ -32,7 +32,7 @@ export function registerTools(server: McpServer, client: PixelFixerClient): void
     // ─── list_projects ───────────────────────────────────────
     server.tool(
         "list_projects",
-        "List all projects in a team",
+        "List all projects in a team. After finding projects, use list_ai_queue to find tasks queued for AI processing.",
         { teamId: z.string().describe("Team ID") },
         async ({ teamId }) => {
             const projects = await client.listProjects(teamId);
@@ -82,7 +82,7 @@ export function registerTools(server: McpServer, client: PixelFixerClient): void
     // ─── list_tasks ──────────────────────────────────────────
     server.tool(
         "list_tasks",
-        "List all tasks in a project. Includes title, status, priority, AI status, tags, and assignee.",
+        "List all tasks in a project. Includes title, status, priority, AI status, tags, and assignee. NOTE: To work on AI tasks, use list_ai_queue + start_task instead of this tool.",
         {
             teamId: z.string().describe("Team ID"),
             projectId: z.string().describe("Project ID"),
@@ -147,7 +147,7 @@ export function registerTools(server: McpServer, client: PixelFixerClient): void
     // ─── update_task ─────────────────────────────────────────
     server.tool(
         "update_task",
-        "Update a task's properties: title, description, status, priority, assignee, or AI status. NOTE: To move a task to another column, use the move_task tool instead. IMPORTANT: title and description MUST be written in English regardless of the user's language.",
+        "Update a task's properties: title, description, status, priority, assignee, or AI status. Do NOT use this to move columns — column moves happen automatically via start_task and complete_ai_task. IMPORTANT: title and description MUST be written in English regardless of the user's language.",
         {
             teamId: z.string().describe("Team ID"),
             projectId: z.string().describe("Project ID"),
@@ -174,7 +174,7 @@ export function registerTools(server: McpServer, client: PixelFixerClient): void
     // ─── move_task ────────────────────────────────────────────
     server.tool(
         "move_task",
-        "Move a task to a different kanban column. Use list_columns to get available column IDs. Position 0 = top of column.",
+        "Move a task to a different kanban column. WARNING: Only use this when the user EXPLICITLY asks to move a task. For AI task workflows, use start_task (→ In Progress) and complete_ai_task (→ Review) instead — they handle column moves automatically.",
         {
             teamId: z.string().describe("Team ID"),
             projectId: z.string().describe("Project ID"),
@@ -224,7 +224,7 @@ export function registerTools(server: McpServer, client: PixelFixerClient): void
     // ─── add_comment ─────────────────────────────────────────
     server.tool(
         "add_comment",
-        "Add a comment to a task. Use this to leave progress notes, ask questions, or report findings. IMPORTANT: comment content MUST be written in English regardless of the user's language.",
+        "Add a comment to a task. Use this to leave progress notes, ask questions, or report findings. Call AFTER making changes and BEFORE complete_ai_task. IMPORTANT: comment content MUST be written in English regardless of the user's language.",
         {
             teamId: z.string().describe("Team ID"),
             projectId: z.string().describe("Project ID"),
@@ -355,7 +355,7 @@ export function registerTools(server: McpServer, client: PixelFixerClient): void
     // ─── create_pull_request ─────────────────────────────────
     server.tool(
         "create_pull_request",
-        "Create a new branch and pull request in the connected GitHub repository. The branch is created from the base branch (default: repo default branch). IMPORTANT: PR title, description, and branch name MUST be in English regardless of the user's language.",
+        "Create a new branch and pull request in the connected GitHub repository. Call this BEFORE commit_files. The branch is created from the base branch (default: repo default branch). IMPORTANT: PR title, description, and branch name MUST be in English regardless of the user's language.",
         {
             teamId: z.string().describe("Team ID"),
             projectId: z.string().describe("Project ID"),
@@ -392,7 +392,7 @@ export function registerTools(server: McpServer, client: PixelFixerClient): void
     // ─── commit_files ──────────────────────────────────────────
     server.tool(
         "commit_files",
-        "Commit one or more file changes to a branch in the connected GitHub repository. Use this after creating a branch (via create_pull_request) to push code changes. Maximum 50 files per commit. IMPORTANT: commit message MUST be in English regardless of the user's language.",
+        "Commit one or more file changes to a branch in the connected GitHub repository. Call this AFTER create_pull_request to push code changes to the branch. Maximum 50 files per commit. IMPORTANT: commit message MUST be in English regardless of the user's language.",
         {
             teamId: z.string().describe("Team ID"),
             projectId: z.string().describe("Project ID"),
@@ -429,10 +429,60 @@ export function registerTools(server: McpServer, client: PixelFixerClient): void
         },
     );
 
+    // ─── start_task ────────────────────────────────────────────
+    server.tool(
+        "start_task",
+        "Start working on an AI task. This is the MANDATORY first step for every AI task. It moves the task to In Progress, sets AI status to PROCESSING, and returns the full context (task, comments, GitHub info, columns) plus the REQUIRED WORKFLOW you must follow. After calling this, follow the workflow instructions in the response exactly.",
+        {
+            teamId: z.string().describe("Team ID"),
+            projectId: z.string().describe("Project ID"),
+            taskId: z.string().describe("Task ID"),
+        },
+        async ({ teamId, projectId, taskId }) => {
+            try {
+                const result = await client.startTask(teamId, projectId, taskId);
+                const context = {
+                    task: result.task,
+                    comments: result.comments,
+                    github: result.github,
+                    columns: result.columns,
+                    reviewColumnId: result.reviewColumnId,
+                    workflow: result.github
+                        ? [
+                            "REQUIRED WORKFLOW — follow these steps IN ORDER:",
+                            "1. Read and understand the task description, screenshot, and any console/network errors.",
+                            "2. Use get_repo_tree and get_file_content to explore the codebase and find relevant files.",
+                            "3. Use create_pull_request to create a new branch and PR (branch name: fix/PF-{taskNumber}-short-description).",
+                            "4. Use commit_files to commit your code changes to the new branch.",
+                            "5. Use add_comment to leave a summary of what you changed (in English).",
+                            "6. Use complete_ai_task with status COMPLETED and the PR URL — the task will be auto-moved to the Review column.",
+                            "IMPORTANT: ALL text (PR titles, commit messages, comments, descriptions) MUST be in English.",
+                        ]
+                        : [
+                            "REQUIRED WORKFLOW — follow these steps IN ORDER:",
+                            "1. Read and understand the task description, screenshot, and any console/network errors.",
+                            "2. No GitHub repository is connected — make changes locally using your IDE tools.",
+                            "3. Use add_comment to describe what you changed (in English).",
+                            "4. Use complete_ai_task with status COMPLETED — the task will be auto-moved to the Review column.",
+                            "IMPORTANT: ALL text (comments, descriptions) MUST be in English.",
+                        ],
+                };
+                return {
+                    content: [{ type: "text", text: JSON.stringify(context, null, 2) }],
+                };
+            } catch (err) {
+                return {
+                    content: [{ type: "text", text: `Error: ${(err as Error).message}` }],
+                    isError: true,
+                };
+            }
+        },
+    );
+
     // ─── complete_ai_task ────────────────────────────────────
     server.tool(
         "complete_ai_task",
-        "Report the result of AI work on a task. Call this AFTER you have committed code via commit_files and created a PR via create_pull_request. The task will be automatically moved to the AI review column if one is configured. IMPORTANT: message/summary MUST be in English regardless of the user's language.",
+        "Report the result of AI work on a task. This is the ONLY way to finish an AI task. Automatically moves the task to the Review column. Call AFTER add_comment. Do NOT move tasks manually with move_task. IMPORTANT: message/summary MUST be in English regardless of the user's language.",
         {
             teamId: z.string().describe("Team ID"),
             projectId: z.string().describe("Project ID"),
@@ -456,7 +506,7 @@ export function registerTools(server: McpServer, client: PixelFixerClient): void
     // ─── list_ai_queue ───────────────────────────────────────
     server.tool(
         "list_ai_queue",
-        "List tasks that are queued or in-progress for AI processing. For EACH task, you MUST call get_task_context first to get the full details and required workflow before starting work.",
+        "List tasks that are queued or in-progress for AI processing. For EACH task, call start_task to begin work — it moves the task to In Progress and returns the full context and REQUIRED workflow.",
         {
             teamId: z.string().describe("Team ID"),
             projectId: z.string().describe("Project ID"),
@@ -481,7 +531,7 @@ export function registerTools(server: McpServer, client: PixelFixerClient): void
     // ─── get_task_context ────────────────────────────────────
     server.tool(
         "get_task_context",
-        "Get comprehensive context for an AI task in a single call. Returns: full task details, comments, GitHub repo info, project file tree, kanban columns (including AI review column), and the REQUIRED WORKFLOW you must follow. This is the MANDATORY first call when starting work on a task.",
+        "Get comprehensive context for a task without changing its state. Returns: full task details, comments, GitHub repo info, project file tree, kanban columns, and workflow instructions. NOTE: Prefer start_task instead — it does everything this tool does AND moves the task to In Progress.",
         {
             teamId: z.string().describe("Team ID"),
             projectId: z.string().describe("Project ID"),

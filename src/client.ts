@@ -101,6 +101,13 @@ export class PixelFixerClient {
         });
     }
 
+    async startTask(teamId: string, projectId: string, taskId: string): Promise<StartTaskResult> {
+        return this.request<StartTaskResult>(`/api/teams/${teamId}/projects/${projectId}/tasks/${taskId}/start`, {
+            method: "POST",
+            body: JSON.stringify({}),
+        });
+    }
+
     // ─── Comments ────────────────────────────────────────────
     async addComment(teamId: string, projectId: string, taskId: string, content: string): Promise<Comment> {
         return this.request<Comment>(`/api/teams/${teamId}/projects/${projectId}/tasks/${taskId}/comments`, {
@@ -285,6 +292,15 @@ export interface Column {
     isDefault: boolean;
     isInternal: boolean;
     isAiTrigger: boolean;
+    isAiReview: boolean;
+}
+
+export interface StartTaskResult {
+    task: Task;
+    comments: Comment[];
+    github: GitHubConnection | null;
+    columns: Column[];
+    reviewColumnId: string | null;
 }
 
 export interface GitHubConnection {

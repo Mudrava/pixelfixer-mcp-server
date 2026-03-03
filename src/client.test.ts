@@ -384,6 +384,34 @@ describe("reportAiResult", () => {
     });
 });
 
+// ─── Start Task ──────────────────────────────────────────────────
+
+describe("startTask", () => {
+    it("sends POST to /start and returns context", async () => {
+        const startResult = {
+            task: { id: "task1", title: "Fix bug", taskNumber: 42 },
+            comments: [],
+            github: { repoFullName: "org/repo", defaultBranch: "main" },
+            columns: [{ id: "col1", name: "In Progress" }],
+            reviewColumnId: "col-review",
+        };
+        mockFetch.mockResolvedValueOnce(mockResponse(startResult));
+
+        const result = await client.startTask("t1", "p1", "task1");
+
+        const [url, options] = mockFetch.mock.calls[0];
+        expect(url).toBe(`${BASE_URL}/api/teams/t1/projects/p1/tasks/task1/start`);
+        expect(options.method).toBe("POST");
+        expectAuthHeaders();
+        expect(result).toEqual(startResult);
+    });
+
+    it("throws on 400 when task is not queued", async () => {
+        mockFetch.mockResolvedValueOnce(mockResponse({ error: "Task is not in QUEUED status" }, 400));
+        await expect(client.startTask("t1", "p1", "task1")).rejects.toThrow("PixelFixer API error 400");
+    });
+});
+
 // ─── Error handling ──────────────────────────────────────────────
 
 describe("error handling", () => {

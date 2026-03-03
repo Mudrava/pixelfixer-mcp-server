@@ -19,6 +19,7 @@ export declare class PixelFixerClient {
     moveTask(teamId: string, projectId: string, taskId: string, columnId: string, position?: number): Promise<{
         success: boolean;
     }>;
+    startTask(teamId: string, projectId: string, taskId: string): Promise<StartTaskResult>;
     addComment(teamId: string, projectId: string, taskId: string, content: string): Promise<Comment>;
     listComments(teamId: string, projectId: string, taskId: string): Promise<Comment[]>;
     listColumns(teamId: string, projectId: string): Promise<Column[]>;
@@ -160,6 +161,14 @@ export interface Column {
     isDefault: boolean;
     isInternal: boolean;
     isAiTrigger: boolean;
+    isAiReview: boolean;
+}
+export interface StartTaskResult {
+    task: Task;
+    comments: Comment[];
+    github: GitHubConnection | null;
+    columns: Column[];
+    reviewColumnId: string | null;
 }
 export interface GitHubConnection {
     id: string;

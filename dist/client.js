@@ -92,6 +92,12 @@ export class PixelFixerClient {
             body: JSON.stringify({ columnId, position }),
         });
     }
+    async startTask(teamId, projectId, taskId) {
+        return this.request(`/api/teams/${teamId}/projects/${projectId}/tasks/${taskId}/start`, {
+            method: "POST",
+            body: JSON.stringify({}),
+        });
+    }
     // ─── Comments ────────────────────────────────────────────
     async addComment(teamId, projectId, taskId, content) {
         return this.request(`/api/teams/${teamId}/projects/${projectId}/tasks/${taskId}/comments`, {

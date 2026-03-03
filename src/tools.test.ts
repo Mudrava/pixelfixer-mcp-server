@@ -26,6 +26,13 @@ function createMockClient(): PixelFixerClient {
         updateTask: vi.fn().mockResolvedValue({ id: "task1", status: "CLOSED" }),
         moveTask: vi.fn().mockResolvedValue({ success: true }),
         searchTasks: vi.fn().mockResolvedValue([]),
+        startTask: vi.fn().mockResolvedValue({
+            task: { id: "task1", title: "Fix bug", taskNumber: 42, comments: [] },
+            comments: [],
+            github: { repoFullName: "org/repo", defaultBranch: "main" },
+            columns: [{ id: "col1", name: "Backlog" }],
+            reviewColumnId: "col-review",
+        }),
         addComment: vi.fn().mockResolvedValue({ id: "c1", content: "Done" }),
         listComments: vi.fn().mockResolvedValue([]),
         listColumns: vi.fn().mockResolvedValue([{ id: "col1", name: "Backlog" }]),
@@ -83,6 +90,7 @@ const EXPECTED_TOOLS = [
     "complete_ai_task",
     "list_ai_queue",
     "get_task_context",
+    "start_task",
 ];
 
 describe("tool registration", () => {
@@ -380,5 +388,54 @@ describe("tool execution", () => {
         });
         const parsed = JSON.parse(result.content[0].text);
         expect(parsed.reviewColumnId).toBeNull();
+    });
+
+    it("start_task calls client.startTask and returns context with workflow", async () => {
+        const result = await getTool("start_task").handler({
+            teamId: "t1",
+            projectId: "p1",
+            taskId: "task1",
+        });
+        expect(mockClient.startTask).toHaveBeenCalledWith("t1", "p1", "task1");
+        const parsed = JSON.parse(result.content[0].text);
+        expect(parsed.task).toBeDefined();
+        expect(parsed.task.id).toBe("task1");
+        expect(parsed.comments).toEqual([]);
+        expect(parsed.github).toBeDefined();
+        expect(parsed.columns).toBeDefined();
+        expect(parsed.reviewColumnId).toBe("col-review");
+        expect(parsed.workflow).toBeDefined();
+        expect(parsed.workflow[0]).toContain("REQUIRED WORKFLOW");
+        // With GitHub connected, workflow should mention commit_files
+        expect(parsed.workflow.some((s: string) => s.includes("commit_files"))).toBe(true);
+    });
+
+    it("start_task returns workflow without commit_files when no github", async () => {
+        (mockClient as any).startTask.mockResolvedValueOnce({
+            task: { id: "task1", title: "Fix bug" },
+            comments: [],
+            github: null,
+            columns: [],
+            reviewColumnId: null,
+        });
+        const result = await getTool("start_task").handler({
+            teamId: "t1",
+            projectId: "p1",
+            taskId: "task1",
+        });
+        const parsed = JSON.parse(result.content[0].text);
+        expect(parsed.github).toBeNull();
+        expect(parsed.workflow.some((s: string) => s.includes("commit_files"))).toBe(false);
+    });
+
+    it("start_task returns error when task is not queued", async () => {
+        (mockClient as any).startTask.mockRejectedValueOnce(new Error("Task is not in QUEUED status"));
+        const result = await getTool("start_task").handler({
+            teamId: "t1",
+            projectId: "p1",
+            taskId: "task1",
+        });
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toContain("Task is not in QUEUED status");
     });
 });
