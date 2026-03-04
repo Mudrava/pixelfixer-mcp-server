@@ -111,6 +111,9 @@ const EXPECTED_TOOLS = [
     "start_task",
     "complete_ai_task",
     "list_ai_queue",
+    "batch_get_tasks",
+    "batch_start_tasks",
+    "batch_complete_tasks",
 ];
 
 describe("tool registration", () => {

@@ -229,6 +229,7 @@ export function compactTask(t) {
         id: t.id,
         taskNumber: t.taskNumber,
         title: t.title,
+        description: t.description,
         status: t.status,
         priority: t.priority,
         aiStatus: t.aiStatus,

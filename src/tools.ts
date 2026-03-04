@@ -73,7 +73,7 @@ export function registerTools(server: McpServer, client: PixelFixerClient): void
     // в”Ђв”Ђв”Ђ init_session в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
     server.tool(
         "init_session",
-        "Initialize the MCP session вЂ” auto-discovers your team/project and returns the AI task queue. Call this FIRST in every session. If you have multiple teams/projects, use set_context afterward.",
+        "Initialize the MCP session. Call this FIRST before any other tool. Auto-discovers your team/project from the API token and returns the AI task queue. If you have exactly one team and one project, they are auto-selected for all subsequent calls (no need to pass teamId/projectId). If you have multiple teams or projects, call set_context afterward to select which one to work with.",
         {},
         async () => {
             const teams = await client.listTeams();
@@ -115,7 +115,7 @@ export function registerTools(server: McpServer, client: PixelFixerClient): void
     // в”Ђв”Ђв”Ђ set_context в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
     server.tool(
         "set_context",
-        "Set or change the active team and/or project for this session. All subsequent tool calls will use these IDs by default.",
+        "Set or change the active team and/or project for this session. Use this after init_session when you have multiple teams/projects. Once set, all subsequent tool calls will use these IDs automatically — no need to pass teamId/projectId every time.",
         {
             teamId: z.string().optional().describe("Team ID to set as active"),
             projectId: z.string().optional().describe("Project ID to set as active"),
@@ -524,23 +524,25 @@ export function registerTools(server: McpServer, client: PixelFixerClient): void
     // в”Ђв”Ђв”Ђ complete_ai_task в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
     server.tool(
         "complete_ai_task",
-        "Report the result of AI work. Auto-moves task to Review column. Call AFTER add_comment. IMPORTANT: message in English.",
+        "Report the result of AI work. Auto-moves task to Review column. Call AFTER add_comment. IMPORTANT: message in English. Status defaults to COMPLETED if omitted.",
         {
             teamId: optTeamId,
             projectId: optProjectId,
             taskId: optTaskId,
             taskNumber: optTaskNumber,
-            status: z.enum(["COMPLETED", "FAILED"]).describe("AI result status"),
+            status: z.enum(["COMPLETED", "FAILED"]).default("COMPLETED").describe("AI result status (defaults to COMPLETED)"),
             message: z.string().optional().describe("Summary of work done or failure reason"),
             prUrl: z.string().optional().describe("Pull request URL (if any)"),
+            commitHash: z.string().optional().describe("Git commit SHA (if any)"),
         },
-        async ({ teamId, projectId, taskId, taskNumber, status, message, prUrl }) => {
+        async ({ teamId, projectId, taskId, taskNumber, status, message, prUrl, commitHash }) => {
             const tid = resolveTeam(teamId);
             const pid = resolveProject(projectId);
             const id = await resolveTaskId(tid, pid, taskId, taskNumber);
+            const comment = [message, commitHash ? `Commit: ${commitHash}` : ""].filter(Boolean).join("\n") || undefined;
             const result = await client.reportAiResult(tid, pid, id, {
                 aiStatus: status,
-                comment: message,
+                comment,
                 prUrl,
             });
             return text(result);
@@ -550,15 +552,116 @@ export function registerTools(server: McpServer, client: PixelFixerClient): void
     // в”Ђв”Ђв”Ђ list_ai_queue в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
     server.tool(
         "list_ai_queue",
-        "List tasks queued for AI processing (compact summaries). Use start_task on each to begin work.",
-        { teamId: optTeamId, projectId: optProjectId },
-        async ({ teamId, projectId }) => {
+        "List tasks queued for AI processing (compact summaries). Supports optional priority and tag filters. Use start_task on each to begin work.",
+        {
+            teamId: optTeamId,
+            projectId: optProjectId,
+            priority: z.string().optional().describe("Filter by priority: LOW, MEDIUM, HIGH, CRITICAL (comma-separated)"),
+            tag: z.string().optional().describe("Filter by tag names (comma-separated)"),
+        },
+        async ({ teamId, projectId, priority, tag }) => {
             const tid = resolveTeam(teamId);
             const pid = resolveProject(projectId);
-            const tasks = await client.searchTasks(tid, pid, { aiStatus: "QUEUED,PROCESSING" });
+            const tasks = await client.searchTasks(tid, pid, {
+                aiStatus: "QUEUED,PROCESSING",
+                ...(priority ? { priority } : {}),
+                ...(tag ? { tag } : {}),
+            });
             return tasks.length > 0
                 ? text(tasks.map(compactTask))
                 : textMsg("No tasks in AI queue.");
+        },
+    );
+
+    // ─── batch_get_tasks ─────────────────────────────────────
+    server.tool(
+        "batch_get_tasks",
+        "Get full details of multiple tasks in a single call. Accepts an array of task numbers. More efficient than calling get_task multiple times.",
+        {
+            teamId: optTeamId,
+            projectId: optProjectId,
+            taskNumbers: z.array(z.number()).describe("Array of task numbers, e.g. [108, 109, 110]"),
+        },
+        async ({ teamId, projectId, taskNumbers }) => {
+            const tid = resolveTeam(teamId);
+            const pid = resolveProject(projectId);
+            const results = await Promise.all(
+                taskNumbers.map(async (num) => {
+                    try {
+                        const task = await client.resolveTaskByNumber(tid, pid, num);
+                        const full = await client.getTask(tid, pid, task.id);
+                        return full;
+                    } catch (err) {
+                        return { taskNumber: num, error: (err as Error).message };
+                    }
+                }),
+            );
+            return text(results);
+        },
+    );
+
+    // ─── batch_start_tasks ───────────────────────────────────
+    server.tool(
+        "batch_start_tasks",
+        "Start multiple AI tasks at once. Sets each to IN_PROGRESS / PROCESSING. Returns compact results. More efficient than calling start_task multiple times.",
+        {
+            teamId: optTeamId,
+            projectId: optProjectId,
+            taskNumbers: z.array(z.number()).describe("Array of task numbers to start, e.g. [108, 109, 110]"),
+        },
+        async ({ teamId, projectId, taskNumbers }) => {
+            const tid = resolveTeam(teamId);
+            const pid = resolveProject(projectId);
+            const results = await Promise.all(
+                taskNumbers.map(async (num) => {
+                    try {
+                        const task = await client.resolveTaskByNumber(tid, pid, num);
+                        const result = await client.startTask(tid, pid, task.id);
+                        return { taskNumber: num, taskId: result.task.id, success: true };
+                    } catch (err) {
+                        return { taskNumber: num, success: false, error: (err as Error).message };
+                    }
+                }),
+            );
+            return text(results);
+        },
+    );
+
+    // ─── batch_complete_tasks ────────────────────────────────
+    server.tool(
+        "batch_complete_tasks",
+        "Complete multiple AI tasks in a single call. Each entry can have its own message, prUrl, and commitHash. Status defaults to COMPLETED.",
+        {
+            teamId: optTeamId,
+            projectId: optProjectId,
+            tasks: z.array(z.object({
+                taskNumber: z.number().describe("Task number"),
+                status: z.enum(["COMPLETED", "FAILED"]).default("COMPLETED").describe("AI result status"),
+                message: z.string().optional().describe("Summary of work done"),
+                prUrl: z.string().optional().describe("Pull request URL"),
+                commitHash: z.string().optional().describe("Git commit SHA"),
+            })).describe("Array of tasks to complete"),
+        },
+        async ({ teamId, projectId, tasks: taskList }) => {
+            const tid = resolveTeam(teamId);
+            const pid = resolveProject(projectId);
+            const results = await Promise.all(
+                taskList.map(async ({ taskNumber, status, message, prUrl, commitHash }) => {
+                    try {
+                        const task = await client.resolveTaskByNumber(tid, pid, taskNumber);
+                        const comment = [message, commitHash ? `Commit: ${commitHash}` : ""].filter(Boolean).join("\n") || undefined;
+                        const result = await client.reportAiResult(tid, pid, task.id, {
+                            aiStatus: status,
+                            comment,
+                            prUrl,
+                        });
+                        return { taskNumber, success: result.success };
+                    } catch (err) {
+                        return { taskNumber, success: false, error: (err as Error).message };
+                    }
+                }),
+            );
+            return text(results);
         },
     );
 }

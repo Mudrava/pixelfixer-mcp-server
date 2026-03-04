@@ -474,6 +474,7 @@ describe("compactTask", () => {
             id: "task1",
             taskNumber: 42,
             title: "Fix login page",
+            description: "Long description here...",
             status: "IN_PROGRESS",
             priority: "HIGH",
             aiStatus: "PROCESSING",

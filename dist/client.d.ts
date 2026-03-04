@@ -137,6 +137,7 @@ export interface TaskSummary {
     id: string;
     taskNumber: number | null;
     title: string;
+    description: string | null;
     status: string;
     priority: string;
     aiStatus: string;

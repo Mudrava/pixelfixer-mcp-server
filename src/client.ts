@@ -344,6 +344,7 @@ export interface TaskSummary {
     id: string;
     taskNumber: number | null;
     title: string;
+    description: string | null;
     status: string;
     priority: string;
     aiStatus: string;
@@ -357,6 +358,7 @@ export function compactTask(t: Task): TaskSummary {
         id: t.id,
         taskNumber: t.taskNumber,
         title: t.title,
+        description: t.description,
         status: t.status,
         priority: t.priority,
         aiStatus: t.aiStatus,
